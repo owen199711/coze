@@ -89,7 +89,7 @@ mockup lives at [design/atlas-ui.html](design/atlas-ui.html).
 | `/help` | command help |
 | `/compact` | summarize old context, keep a recent tail |
 | `/new` | start a new session |
-| `/sessions` | list recent sessions |
+| `/session` | switch session with ↑/↓ + Enter |
 | `/know [query]` | list or search project memory |
 | `/skill list` | list installed skills |
 | `/skill install <path-or-url>` | install a Markdown skill |
@@ -107,12 +107,13 @@ quit.
 Keys: `Ctrl+N` new session, `Ctrl+Q` quit, `F1` help, `Esc Esc` quit.
 
 The TUI streams assistant text through the OpenAI-compatible SSE path. Tool
-calls are shown as collapsed cards; click a card title to expand its result.
-The transcript is a scrollable log, and long tool output scrolls inside the
-expanded card. `/compact` asks the configured model to summarize older messages
-and saves the reduced checkpoint. `/skill install` accepts a local `SKILL.md` or
-an http(s) URL; installed skills are listed in the system prompt and loaded on
-demand.
+calls are shown as collapsed cards; while a tool is running its title shows a
+spinner, and clicking the card expands the result. The transcript is a
+scrollable log, and long tool output scrolls inside the expanded card.
+`/session` opens a keyboard-selectable session picker (↑/↓ + Enter).
+`/compact` asks the configured model to summarize older messages and saves the
+reduced checkpoint. `/skill install` accepts a local `SKILL.md` or an http(s)
+URL; installed skills are listed in the system prompt and loaded on demand.
 
 Try the bundled example:
 
@@ -199,7 +200,7 @@ Commands: `Atlas: Chat`, `Atlas: Doctor`, `Atlas: Initialize Project`,
 | Dangerous-command deny list | ✅ basic |
 | Test/lint/check + verification evidence | ✅ |
 | OpenAI-compatible chat loop | ✅ |
-| Textual TUI (opencode-style entry) | ✅ streaming, collapsible tool cards, scrollable transcript |
+| Textual TUI (opencode-style entry) | ✅ streaming, spinner tool cards, session picker, scrollable transcript |
 | Skills (local/URL `SKILL.md` install) | ✅ descriptions in prompt; loaded on demand |
 | Context compaction (`/compact`) | ✅ model summary + reduced checkpoint |
 | Offline end-to-end demo | ✅ |

@@ -1,7 +1,7 @@
 # M0 Task Board
 
 > Scope: Lean Atlas v1, Python M0.
-> Status: **pytest 63 passed; 10-task eval real DeepSeek 10/10 (pass_rate=1.0); curator LLM RCA opt-in with deterministic fallback and real DeepSeek validation; AgentScope text-turn restoration; wheel + VSIX built.** VSIX installation, curator replay validation, and AgentScope tool-history/middleware are not verified yet.
+> Status: **pytest 64 passed; 10-task eval real DeepSeek 10/10 (pass_rate=1.0); curator LLM RCA opt-in with deterministic fallback and real DeepSeek validation; AgentScope text-turn restoration; wheel + VSIX built.** VSIX installation, curator replay validation, and AgentScope tool-history/middleware are not verified yet.
 > Rule: one task = one verifiable change; no new top-level service/table/tool without an ADR.
 
 ## Completion summary (2026-11-17)
@@ -10,7 +10,7 @@
 - 🟦 code written / partial verification: 0 tasks
 - 🟡 partial or needs IDE/scale validation: 2 tasks (M0-13, 14)
 - ⏳ not started: 0
-- **M0 core is verified**: `pytest -q` → 63 passed; real DeepSeek chat + AgentScope `run_once` + 10/10 eval; 10-task fixtures validated red→green; curator LLM RCA fake-model/fallback/real-DeepSeek validated.
+- **M0 core is verified**: `pytest -q` → 64 passed; real DeepSeek chat + AgentScope `run_once` + 10/10 eval; 10-task fixtures validated red→green; curator LLM RCA fake-model/fallback/real-DeepSeek validated.
 - **Not yet verified**: VSIX installation inside VSCode, curator replay promotion, AgentScope tool-history/middleware.
 
 ## Status legend
@@ -34,7 +34,7 @@
 | M0-07 | CLI (`init/doctor/demo/chat/tui/session/knowledge`) | ✅ | `src/atlas/cli.py` | real `atlas chat` + Textual TUI + demo; errors return 2 |
 | M0-08 | Offline end-to-end demo | ✅ | `src/atlas/demo.py` | red exit ≠ 0, green exit = 0, knowledge hit |
 | M0-09 | Tests written | ✅ | `tests/` | `pytest -q` passes |
-| M0-10 | Run tests & fix failures | ✅ | `tests/` | 63 passed |
+| M0-10 | Run tests & fix failures | ✅ | `tests/` | 64 passed |
 | M0-11 | Smoke `init/doctor/demo` on a clean temp dir | ✅ | — | demo `ok: true`; doctor base_tables = 15 |
 | M0-12 | AgentScope `Agent` adapter (experimental, one turn) | ✅ | `src/atlas/agentscope_adapter.py` | fake model + local SSE + real DeepSeek `run_once`; text turns restored/recorded; tool-history/middleware pending |
 | M0-12a | JSON-RPC HTTP daemon (`/rpc`, `/health`) | ✅ | `src/atlas/daemon.py` | doctor/session/knowledge dispatch |
@@ -88,14 +88,15 @@ without opening the session journal.
 ## Verified in this session
 
 ```text
-pytest -q                        63 passed
+pytest -q                        64 passed
 atlas init --path <tmp>          ok
 atlas doctor --path <tmp>        base_tables=15, fts5=true
 atlas demo                       red_exit=1, green_exit=0, ok=true
 atlas (no args)                  TTY -> Textual TUI; pipe -> chat
 atlas tui                        TUI mount; / palette; # file; Esc Esc; fake model
 TUI streaming                    chat_stream + on_text/on_event
-TUI tool cards                   collapsed by default; expandable; scrollable body
+TUI tool cards                   collapsed by default; spinner while running; expandable
+/session                        ↑/↓ session picker; Enter switches session
 /compact                        model summary + reduced checkpoint
 /skill                          install/list/remove + prompt injection
 /know                           list/search active memory

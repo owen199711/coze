@@ -27,7 +27,7 @@ COMMANDS = [
     ("help", "show commands"),
     ("compact", "summarize old context"),
     ("new", "start a new session"),
-    ("sessions", "list recent sessions"),
+    ("session", "switch session"),
     ("know", "list or search project memory"),
     ("skill", "list/install/remove skills"),
     ("doctor", "show Atlas doctor JSON"),
@@ -53,6 +53,7 @@ FILE_CACHE_TTL = 2.0
 # Cap on tracked tool blocks so an interrupted turn (tool.call with no
 # matching tool.result) cannot grow the dict without bound.
 MAX_TOOL_BLOCKS = 50
+SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
 def is_available() -> bool:
@@ -261,6 +262,8 @@ class AtlasTUI(App[None]):
         self._last_escape: float = 0.0
         self._stream_buffer = ""
         self._tool_blocks: dict[str, tuple[Collapsible, Static]] = {}
+        self._running_tools: dict[str, tuple[Collapsible, str, str]] = {}
+        self._spinner_index = 0
 
     def compose(self) -> ComposeResult:
         yield Static("", id="topbar")
@@ -286,6 +289,7 @@ class AtlasTUI(App[None]):
         self._status = self.query_one("#status", Static)
         self._palette.display = False
         self._stream.display = False
+        self.set_interval(0.12, self._animate_tools)
         self._update_header()
         self._welcome()
         self._prompt.focus()
@@ -348,7 +352,7 @@ class AtlasTUI(App[None]):
             "| `/help` | show this help |\n"
             "| `/compact` | summarize old context |\n"
             "| `/new` | start a new session |\n"
-            "| `/sessions` | list recent sessions |\n"
+            "| `/session` | switch session with ↑/↓ + Enter |\n"
             "| `/know [query]` | list or search project memory |\n"
             "| `/skill list` | list installed skills |\n"
             "| `/skill install <path-or-url>` | install a skill |\n"
@@ -418,6 +422,28 @@ class AtlasTUI(App[None]):
         options = [Option(path, id=f"file:{path}") for path in matches]
         self._show_palette("file", options)
 
+    def _show_sessions(self) -> None:
+        rows = self.atlas.list_sessions(limit=50)
+        if not rows:
+            self._hide_palette()
+            self._chat.write(Text("No sessions yet.", style="dim"))
+            return
+        options: list[Option] = []
+        for row in rows:
+            title = str(row.get("title") or "Untitled")
+            updated = str(row.get("updated_at") or "")[:16].replace("T", " ")
+            marker = "●" if row["id"] == self.session_id else " "
+            options.append(
+                Option(
+                    f"{marker} {title}  ·  {row['id'][:8]}  ·  {updated}",
+                    id=f"session:{row['id']}",
+                )
+            )
+        self._show_palette("session", options)
+        self._status.update(
+            Text("Select a session: ↑/↓ then Enter · Esc cancels", style="#d29922")
+        )
+
     def _expand_file_refs(self, text: str) -> tuple[str, list[str]]:
         """Expand `#path` tokens into a bounded, read-only file attachment block."""
         root = Path(self.atlas.config.root).resolve()
@@ -467,10 +493,26 @@ class AtlasTUI(App[None]):
             self._hide_palette()
             self._prompt.focus()
             return
+        if self._palette_mode == "session":
+            session_id = option.id.removeprefix("session:")
+            self._hide_palette()
+            if self.atlas.session(session_id):
+                self.session_id = session_id
+                self._update_header()
+                self._tool_blocks.clear()
+                self._running_tools.clear()
+                self._chat.clear()
+                self._welcome()
+            self._prompt.focus()
+            return
         self._hide_palette()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         text = event.value
+        if self._palette_mode == "session":
+            if not text:
+                return
+            self._hide_palette()
         if text.startswith("/") and " " not in text:
             self._show_commands(text[1:])
             return
@@ -495,6 +537,8 @@ class AtlasTUI(App[None]):
             if self._palette.display:
                 self._hide_palette()
                 self._last_escape = 0.0
+                if not self._busy:
+                    self._status.update(self._status_text())
                 event.stop()
                 event.prevent_default()
                 return
@@ -528,6 +572,7 @@ class AtlasTUI(App[None]):
         self.session_id = session["id"]
         self._update_header()
         self._tool_blocks.clear()
+        self._running_tools.clear()
         self._chat.clear()
         self._welcome()
 
@@ -548,22 +593,12 @@ class AtlasTUI(App[None]):
             return
         if command == "/clear":
             self._tool_blocks.clear()
+            self._running_tools.clear()
             self._chat.clear()
             self._welcome()
             return
-        if command == "/sessions":
-            rows = self.atlas.list_sessions(limit=20)
-            if not rows:
-                self._chat.write(Text("No sessions yet.", style="dim"))
-            for row in rows:
-                marker = " *" if row["id"] == self.session_id else "  "
-                self._chat.write(
-                    Text(
-                        f"{marker} {row['id']}  {row.get('title') or ''}  "
-                        f"{row.get('updated_at') or ''}",
-                        style="dim",
-                    )
-                )
+        if command in {"/session", "/sessions"}:
+            self._show_sessions()
             return
         if command == "/compact":
             if self._busy:
@@ -698,29 +733,42 @@ class AtlasTUI(App[None]):
             return
         self._chat.write_assistant(content)
 
+    def _animate_tools(self) -> None:
+        if not self._running_tools:
+            return
+        self._spinner_index = (self._spinner_index + 1) % len(SPINNER_FRAMES)
+        frame = SPINNER_FRAMES[self._spinner_index]
+        for block, name, arguments in self._running_tools.values():
+            block.title = f"{frame} {name}  {arguments}"
+
     def _on_agent_event(self, event_type: str, payload: dict[str, Any]) -> None:
         if event_type == "tool.call":
             self._flush_stream()
             call_id = str(payload.get("id") or payload.get("name") or "tool")
             name = payload.get("name") or "?"
             arguments = str(payload.get("arguments") or "")[:160]
-            block, body = self._chat.write_tool(f"⏺ {name}  {arguments}")
+            frame = SPINNER_FRAMES[self._spinner_index]
+            block, body = self._chat.write_tool(f"{frame} {name}  {arguments}")
             body.update(Text("running...", style="#d29922"))
             self._tool_blocks[call_id] = (block, body)
+            self._running_tools[call_id] = (block, name, arguments)
             # An interrupted turn can leave a tool.call with no matching
             # tool.result; evict the oldest tracked block so the dict stays
             # bounded. The widget itself remains in the transcript.
             while len(self._tool_blocks) > MAX_TOOL_BLOCKS:
-                self._tool_blocks.pop(next(iter(self._tool_blocks)))
+                old_id = next(iter(self._tool_blocks))
+                self._tool_blocks.pop(old_id, None)
+                self._running_tools.pop(old_id, None)
         elif event_type == "tool.result":
             call_id = str(payload.get("id") or payload.get("name") or "tool")
             name = payload.get("name") or "?"
             status = payload.get("status") or "?"
             summary = str(payload.get("summary") or "")[:120]
+            self._running_tools.pop(call_id, None)
             pair = self._tool_blocks.pop(call_id, None)
             if pair is not None:
                 block, body = pair
-                block.title = f"⏺ {name}  {status}  {summary}"
+                block.title = f"{name}  {status}  {summary}"
                 body.update(Text(str(payload.get("output") or summary), style="#8b949e"))
 
     async def _compact(self) -> None:

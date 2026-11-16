@@ -17,7 +17,7 @@ pytest.importorskip("textual")
 from textual.containers import VerticalScroll
 from textual.widgets import Collapsible, Input, Static
 
-from atlas.tui import AtlasTUI, MessageLog
+from atlas.tui import AtlasTUI, MessageLog, SPINNER_FRAMES
 
 
 class FakeModel:
@@ -248,6 +248,9 @@ def test_tui_tool_blocks_are_collapsible(tmp_path: Path) -> None:
                 assert len(blocks) == 1
                 block = blocks[0]
                 assert block.collapsed is True
+                assert "⏺" not in block.title
+                await pilot.pause(0.3)
+                assert any(frame in block.title for frame in SPINNER_FRAMES)
                 body = block.query_one(".tool-body", Static)
                 assert "running" in body.content.plain
 
@@ -263,6 +266,7 @@ def test_tui_tool_blocks_are_collapsible(tmp_path: Path) -> None:
                 )
                 await pilot.pause()
                 assert "ok" in block.title
+                assert not any(frame in block.title for frame in SPINNER_FRAMES)
                 assert "line" in body.content.plain
                 block.collapsed = False
                 await pilot.pause()
@@ -345,6 +349,35 @@ def test_tui_status_shows_busy_and_idle(tmp_path: Path) -> None:
                 assert "ready" in app._status.content.plain
 
         asyncio.run(run())
+    finally:
+        atlas.close()
+
+
+def test_tui_session_picker_switches_session(tmp_path: Path) -> None:
+    atlas = Atlas.init(tmp_path, name="tui-session-picker-test")
+    try:
+        first = atlas.create_session("first")
+        current = atlas.create_session("current")
+        other = atlas.create_session("other")
+        app = AtlasTUI(atlas, current["id"])
+
+        async def run() -> None:
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._show_sessions()
+                await pilot.pause()
+                assert app._palette.display is True
+                assert app._palette.option_count == 3
+                ids = [option.id for option in app._palette.options]
+                index = ids.index(f"session:{other['id']}")
+                app._palette.highlighted = index
+                app._select_palette()
+                await pilot.pause()
+                assert app.session_id == other["id"]
+                assert app._palette.display is False
+
+        asyncio.run(run())
+        assert first["id"] != app.session_id
     finally:
         atlas.close()
 
