@@ -17,3 +17,4 @@ build/
 
 # local scratch
 _probe_*.py
+.tui_shot.py

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,7 @@ from rich.markdown import Markdown
 from rich.text import Text
 from textual import events, on
 from textual.app import App, ComposeResult
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Collapsible, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
@@ -85,6 +86,32 @@ class MessageLog(VerticalScroll):
         self.call_after_refresh(self.scroll_end, animate=False)
         return block, body_widget
 
+    def write_user(self, content: str) -> None:
+        stamp = datetime.now().strftime("%H:%M")
+        label = Static(
+            Text.assemble(("You", "bold #79c0ff"), (f"   {stamp}", "#4b5059")),
+            classes="msg-label",
+        )
+        body = Static(
+            Text.assemble(("❯ ", "#d97757"), content),
+            classes="msg-user",
+        )
+        self.mount(label, body)
+        self.call_after_refresh(self.scroll_end, animate=False)
+
+    def write_assistant(self, content: Any) -> None:
+        stamp = datetime.now().strftime("%H:%M")
+        label = Static(
+            Text.assemble(
+                ("✳ Atlas", "bold #d97757"),
+                (f"   {stamp}", "#4b5059"),
+            ),
+            classes="msg-label",
+        )
+        body = Static(content, classes="msg-assistant")
+        self.mount(label, body)
+        self.call_after_refresh(self.scroll_end, animate=False)
+
     def clear(self) -> None:
         self.remove_children()
 
@@ -128,14 +155,35 @@ class AtlasTUI(App[None]):
         background: #161b22;
         color: #c9d1d9;
     }
-    #prompt {
+    #composer {
+        height: 3;
         margin-top: 1;
         padding: 0 2;
         border: round #30363d;
         background: #161b22;
+        align: center middle;
     }
-    #prompt:focus {
+    #composer:focus-within {
         border: round #d97757;
+    }
+    #prompt-sign {
+        width: 2;
+        color: #d97757;
+        content-align: center middle;
+    }
+    #prompt {
+        width: 1fr;
+        height: 1;
+        border: none;
+        background: transparent;
+        padding: 0;
+    }
+    #enter-key {
+        width: 7;
+        height: 1;
+        content-align: center middle;
+        color: #6e7681;
+        background: #0d1117;
     }
     #palette {
         display: none;
@@ -151,6 +199,21 @@ class AtlasTUI(App[None]):
         margin-top: 1;
         color: #6e7681;
         padding: 0 3;
+    }
+    .msg-label {
+        height: 1;
+        margin-top: 1;
+        padding: 0 1;
+    }
+    .msg-user {
+        height: auto;
+        margin-bottom: 1;
+        padding: 0 2;
+    }
+    .msg-assistant {
+        height: auto;
+        margin-bottom: 1;
+        padding: 0 2;
     }
     .message {
         height: auto;
@@ -200,10 +263,13 @@ class AtlasTUI(App[None]):
             yield MessageLog(id="chat")
             yield Static("", id="stream")
             yield OptionList(id="palette", markup=False)
-            yield Input(
-                placeholder="Ask Atlas...   / commands   # files",
-                id="prompt",
-            )
+            with Horizontal(id="composer"):
+                yield Static("❯", id="prompt-sign")
+                yield Input(
+                    placeholder="Ask Atlas...",
+                    id="prompt",
+                )
+                yield Static("Enter", id="enter-key")
             yield Static("", id="status")
 
     def on_mount(self) -> None:
@@ -627,10 +693,7 @@ class AtlasTUI(App[None]):
         if not content:
             self._chat.write(Text("(empty reply)", style="dim"))
             return
-        self._chat.write(Text(""))
-        self._chat.write(Text("Atlas", style="bold #d97757"))
-        self._chat.write(Markdown(content))
-        self._chat.write(Text(""))
+        self._chat.write_assistant(Markdown(content))
 
     def _on_agent_event(self, event_type: str, payload: dict[str, Any]) -> None:
         if event_type == "tool.call":
@@ -712,8 +775,7 @@ class AtlasTUI(App[None]):
         self._set_busy(True, "Atlas is thinking...")
         self._stream_buffer = ""
         self._stream.display = False
-        self._chat.write(Text(""))
-        self._chat.write(Text.assemble(("You  ", "bold #79c0ff"), text))
+        self._chat.write_user(text)
 
         def on_text(delta: str) -> None:
             try:
