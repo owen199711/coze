@@ -81,7 +81,8 @@ atlas
 ### Terminal UI
 
 `atlas` in a real terminal opens a full-screen Textual UI (opencode-style entry
-point). Piped/non-TTY use falls back to the plain `atlas chat` loop.
+point). Piped/non-TTY use falls back to the plain `atlas chat` loop. A visual
+mockup lives at [design/atlas-ui.html](design/atlas-ui.html).
 
 | Command | Meaning |
 |---|---|
@@ -312,5 +313,3 @@ tests/
 
 The point of this milestone is to make the **durable core** runnable and testable before
 adding more nouns. See `docs/atlas-maturity-roadmap.md` for the path from MVP to production.
-#   c o z e  
- 
