@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atlas-agent"
+version = "0.1.0"
+description = "Lean Atlas: a small, local-first coding agent built on a durable knowledge/session core."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+  "PyYAML>=6.0",
+  "textual>=0.70",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+agentscope = ["agentscope>=2.0.0"]
+tui = ["textual>=0.70"]
+
+[project.scripts]
+atlas = "atlas.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

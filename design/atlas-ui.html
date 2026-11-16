@@ -1,0 +1,696 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Atlas — UI concept</title>
+  <style>
+    :root {
+      --bg: #0b0c0f;
+      --panel: #111318;
+      --panel-2: #15181e;
+      --line: #23272f;
+      --line-soft: #1a1d23;
+      --text: #e7e9ee;
+      --muted: #8b919c;
+      --faint: #5b616c;
+      --accent: #d97757;
+      --accent-soft: #2a1b16;
+      --green: #7ee787;
+      --yellow: #d29922;
+      --mono: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+      --sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 15px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .app {
+      width: min(1180px, 100%);
+      height: 100vh;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      border-left: 1px solid transparent;
+      border-right: 1px solid transparent;
+    }
+
+    /* ---------------- top bar ---------------- */
+    .topbar {
+      height: 54px;
+      flex: 0 0 54px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 0 32px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      font-weight: 600;
+      letter-spacing: -.01em;
+      color: #f3f4f7;
+      white-space: nowrap;
+    }
+
+    .brand-mark {
+      color: var(--accent);
+      font-size: 18px;
+      line-height: 1;
+    }
+
+    .crumb {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--faint);
+      font-family: var(--mono);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .crumb strong { color: var(--muted); font-weight: 500; }
+
+    .top-actions {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .pill {
+      padding: 4px 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: #0e1014;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      padding-left: 5px;
+    }
+
+    .status i {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 0 3px rgba(126, 231, 135, .08);
+    }
+
+    /* ---------------- workspace ---------------- */
+    .workspace {
+      min-height: 0;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .transcript {
+      flex: 1;
+      overflow-y: auto;
+      padding: 28px 40px 14px;
+      scrollbar-color: #2a2e36 transparent;
+      scrollbar-width: thin;
+    }
+
+    .message, .tool-card, .composer, .palette {
+      width: min(860px, 100%);
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    .message { margin-bottom: 22px; }
+
+    .msg-label {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 10px;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--faint);
+    }
+
+    .msg-label .name { color: var(--muted); letter-spacing: .02em; text-transform: none; }
+    .msg-label .time { margin-left: auto; letter-spacing: 0; color: #4b5059; }
+
+    .assistant-label .brand-mark { font-size: 14px; }
+
+    .user-copy {
+      color: #f0f1f4;
+      font-size: 16px;
+      line-height: 1.65;
+      padding-left: 23px;
+      position: relative;
+    }
+
+    .user-copy::before {
+      content: "❯";
+      position: absolute;
+      left: 0;
+      top: 0;
+      color: var(--accent);
+      font-family: var(--mono);
+      font-size: 14px;
+    }
+
+    .prose {
+      padding-left: 23px;
+      color: #c9cdd5;
+      font-size: 14.5px;
+      line-height: 1.75;
+    }
+
+    .prose p { margin: 0 0 12px; }
+    .prose p:last-child { margin-bottom: 0; }
+    .prose strong { color: #f0f1f4; font-weight: 600; }
+    .prose ul { margin: 10px 0 14px; padding-left: 20px; }
+    .prose li { margin: 7px 0; }
+    .prose code, .inline-code {
+      font-family: var(--mono);
+      font-size: .9em;
+      color: #e8c4b4;
+      background: #1b1613;
+      border: 1px solid #2a211c;
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+
+    .streaming-line {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-left: 23px;
+      color: var(--muted);
+      font-size: 14px;
+      min-height: 24px;
+    }
+
+    .stream-cursor {
+      display: inline-block;
+      width: 7px;
+      height: 15px;
+      background: var(--accent);
+      opacity: .85;
+      animation: blink 1.05s steps(1, end) infinite;
+    }
+
+    @keyframes blink { 0%, 49% { opacity: .85; } 50%, 100% { opacity: 0; } }
+
+    /* ---------------- tool cards ---------------- */
+    .tool-card {
+      margin-top: -12px;
+      margin-bottom: 22px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .tool-card[open] { border-color: #2b3039; }
+
+    .tool-card summary {
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      min-height: 44px;
+      padding: 0 14px;
+      cursor: pointer;
+      user-select: none;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .tool-card summary::-webkit-details-marker { display: none; }
+
+    .chev {
+      color: var(--faint);
+      font-size: 10px;
+      width: 10px;
+      transition: transform .15s ease;
+    }
+
+    .tool-card[open] .chev { transform: rotate(90deg); }
+    .tool-dot { color: var(--accent); font-size: 13px; }
+    .tool-name { color: #d8dbe1; }
+    .tool-arg { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tool-meta { margin-left: auto; display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+
+    .badge {
+      border: 1px solid #24402b;
+      color: var(--green);
+      background: #0e1a12;
+      border-radius: 999px;
+      padding: 2px 7px;
+      font-size: 10px;
+      line-height: 1.4;
+    }
+
+    .badge.warn { color: var(--yellow); border-color: #3c3217; background: #1a150b; }
+    .dur { color: #4d535d; }
+
+    .tool-body {
+      border-top: 1px solid var(--line-soft);
+      background: #0b0c0f;
+      max-height: 140px;
+      overflow-y: auto;
+    }
+
+    .tool-body pre {
+      margin: 0;
+      padding: 13px 16px 15px;
+      color: #aab1bc;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.65;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .tool-body .ln { color: #3d434d; user-select: none; padding-right: 12px; }
+    .tool-body .path { color: #8ba4c7; }
+    .tool-body .ok { color: var(--green); }
+    .tool-body .dim { color: #676e79; }
+
+    /* ---------------- composer ---------------- */
+    .composer-wrap {
+      flex: 0 0 auto;
+      position: relative;
+      padding: 0 40px 12px;
+      background: linear-gradient(to bottom, rgba(11, 12, 15, 0), var(--bg) 28%);
+    }
+
+    .composer {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 54px;
+      padding: 0 14px;
+      background: var(--panel);
+      border: 1px solid #2b3039;
+      border-radius: 12px;
+      transition: border-color .15s ease, box-shadow .15s ease;
+    }
+
+    .composer:focus-within {
+      border-color: #7a4a3b;
+      box-shadow: 0 0 0 3px rgba(217, 119, 87, .08);
+    }
+
+    .prompt-sign {
+      color: var(--accent);
+      font-family: var(--mono);
+      font-size: 15px;
+      line-height: 1;
+      user-select: none;
+    }
+
+    #prompt {
+      flex: 1;
+      min-width: 0;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: #eef0f4;
+      font-family: var(--sans);
+      font-size: 15px;
+      line-height: 1.4;
+      padding: 15px 0;
+    }
+
+    #prompt::placeholder { color: #555c67; }
+
+    .enter-key {
+      flex: 0 0 auto;
+      color: #6c737e;
+      border: 1px solid #2b3039;
+      background: #0e1014;
+      border-radius: 5px;
+      padding: 3px 7px;
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    .composer-hints {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 4px 0;
+      color: #555c67;
+      font-family: var(--mono);
+      font-size: 10.5px;
+      flex-wrap: wrap;
+    }
+
+    .chip {
+      border: 1px solid #23272f;
+      background: #0f1115;
+      color: #767d88;
+      border-radius: 999px;
+      padding: 3px 8px;
+    }
+
+    .hint-key { color: #8b919c; }
+
+    /* ---------------- command palette ---------------- */
+    .palette {
+      position: absolute;
+      left: 40px;
+      right: 40px;
+      bottom: calc(100% - 1px);
+      z-index: 20;
+      max-width: 860px;
+      margin: 0 auto;
+      background: #12151a;
+      border: 1px solid #2b3039;
+      border-radius: 12px;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, .45);
+      overflow: hidden;
+    }
+
+    .palette-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line-soft);
+      color: #626974;
+      font-family: var(--mono);
+      font-size: 10.5px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    .palette-head kbd {
+      margin-left: auto;
+      color: #565d68;
+      border: 1px solid #282d36;
+      background: #0d0f13;
+      padding: 2px 5px;
+      border-radius: 4px;
+      font-size: 9.5px;
+      text-transform: none;
+    }
+
+    .palette-item {
+      display: grid;
+      grid-template-columns: 22px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 14px;
+      cursor: pointer;
+      border-left: 2px solid transparent;
+    }
+
+    .palette-item:hover, .palette-item.selected {
+      background: #191d23;
+      border-left-color: var(--accent);
+    }
+
+    .palette-icon { color: var(--accent); font-family: var(--mono); font-size: 12px; }
+    .palette-name { color: #dfe2e8; font-family: var(--mono); font-size: 12px; }
+    .palette-desc { color: #626974; font-size: 11px; margin-top: 2px; }
+    .palette-key { color: #4d535d; font-family: var(--mono); font-size: 10px; }
+
+    /* ---------------- status ---------------- */
+    .statusbar {
+      flex: 0 0 32px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 0 32px;
+      border-top: 1px solid var(--line-soft);
+      color: #4d535d;
+      font-family: var(--mono);
+      font-size: 10px;
+      white-space: nowrap;
+    }
+
+    .statusbar .sep { color: #2b3039; }
+    .statusbar .right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+    .context-meter { width: 54px; height: 3px; background: #1e2229; border-radius: 999px; overflow: hidden; }
+    .context-meter span { display: block; width: 31%; height: 100%; background: var(--accent); }
+
+    @media (max-width: 760px) {
+      .topbar, .statusbar { padding-left: 18px; padding-right: 18px; }
+      .transcript { padding: 24px 18px 14px; }
+      .composer-wrap { padding-left: 18px; padding-right: 18px; }
+      .palette { left: 18px; right: 18px; }
+      .crumb, .pill.session, .statusbar .cwd { display: none; }
+      .composer-hints .optional { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">✳</span><span>Atlas</span></div>
+      <div class="crumb"><strong>coze</strong><span>/</span><span>workspace</span></div>
+      <div class="top-actions">
+        <span class="pill">deepseek-chat</span>
+        <span class="pill session">ses_57f4</span>
+        <span class="status"><i></i>ready</span>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="transcript" id="transcript">
+        <article class="message">
+          <div class="msg-label"><span class="name">You</span><span class="time">12:04</span></div>
+          <div class="user-copy">帮我介绍一下这个项目，顺便看看 TUI 的布局问题。</div>
+        </article>
+
+        <article class="message">
+          <div class="msg-label assistant-label">
+            <span class="brand-mark">✳</span><span class="name">Atlas</span><span class="time">12:04</span>
+          </div>
+          <div class="prose">
+            <p>这是一个本地优先的 Python coding agent。核心很小，围绕三件事：</p>
+            <ul>
+              <li><strong>一个知识库</strong>：项目事实、偏好、决策、经验统一存在 KnowledgeService。</li>
+              <li><strong>一个会话日志</strong>：checkpoint + turns，进程重启后还能继续。</li>
+              <li><strong>一个执行服务</strong>：读写文件、跑命令、记录验证证据。</li>
+            </ul>
+            <p>TUI 是前端壳，真正的模型和工具调用都在 <code>Atlas</code> 里。</p>
+          </div>
+        </article>
+
+        <details class="tool-card" open>
+          <summary>
+            <span class="chev">▶</span>
+            <span class="tool-dot">⏺</span>
+            <span class="tool-name">read</span>
+            <span class="tool-arg">src/atlas/tui.py · lines 1–210</span>
+            <span class="tool-meta"><span class="badge">ok</span><span class="dur">18ms</span></span>
+          </summary>
+          <div class="tool-body">
+<pre><span class="ln">001</span><span class="dim">from</span> textual.app <span class="dim">import</span> App, ComposeResult
+<span class="ln">002</span><span class="dim">from</span> textual.containers <span class="dim">import</span> Vertical, VerticalScroll
+<span class="ln">003</span>
+<span class="ln">004</span><span class="dim">class</span> <span class="path">MessageLog</span>(VerticalScroll):
+<span class="ln">005</span>    <span class="dim">def</span> write(self, content):
+<span class="ln">006</span>        ...</pre>
+          </div>
+        </details>
+
+        <details class="tool-card">
+          <summary>
+            <span class="chev">▶</span>
+            <span class="tool-dot">⏺</span>
+            <span class="tool-name">search</span>
+            <span class="tool-arg">"Collapsible|VerticalScroll" in src/atlas</span>
+            <span class="tool-meta"><span class="badge">ok</span><span class="dur">9ms</span></span>
+          </summary>
+          <div class="tool-body">
+<pre><span class="ln">001</span><span class="path">src/atlas/tui.py</span>
+<span class="ln">002</span>  Collapsible, Input, OptionList, Static
+<span class="ln">003</span>  MessageLog(VerticalScroll)</pre>
+          </div>
+        </details>
+
+        <article class="message">
+          <div class="msg-label assistant-label">
+            <span class="brand-mark">✳</span><span class="name">Atlas</span><span class="time">12:05</span>
+          </div>
+          <div class="prose">
+            <p>把工具结果收进折叠卡片，并拉开消息间距，能明显降低拥挤感；展开后的输出再单独滚动。</p>
+          </div>
+        </article>
+
+        <article class="message">
+          <div class="msg-label assistant-label">
+            <span class="brand-mark">✳</span><span class="name">Atlas</span><span class="time">12:05</span>
+          </div>
+          <div class="streaming-line">
+            <span>正在检查折叠卡的滚动边界</span>
+            <span class="stream-cursor" aria-hidden="true"></span>
+          </div>
+        </article>
+      </section>
+
+      <div class="composer-wrap">
+        <div class="palette" id="palette" hidden>
+          <div class="palette-head">
+            <span>Commands</span>
+            <kbd>esc to close</kbd>
+          </div>
+          <div id="palette-items"></div>
+        </div>
+
+        <div class="composer">
+          <span class="prompt-sign">❯</span>
+          <input id="prompt" autocomplete="off" spellcheck="false" placeholder="Ask Atlas...">
+          <span class="enter-key">Enter</span>
+        </div>
+        <div class="composer-hints">
+          <span class="chip">/ commands</span>
+          <span class="chip"># files</span>
+          <span class="chip optional">/compact</span>
+          <span class="chip optional">/know</span>
+          <span class="chip optional">/skill</span>
+          <span class="hint-key">Esc Esc to quit</span>
+        </div>
+      </div>
+    </main>
+
+    <footer class="statusbar">
+      <span>deepseek-chat</span><span class="sep">/</span>
+      <span class="cwd">D:\code\coze</span><span class="sep">/</span>
+      <span>context</span><span class="context-meter"><span></span></span>
+      <span class="right"><span>61 tests</span><span class="sep">/</span><span>Esc Esc</span></span>
+    </footer>
+  </div>
+
+  <script>
+    const input = document.getElementById('prompt');
+    const palette = document.getElementById('palette');
+    const items = document.getElementById('palette-items');
+
+    const commands = [
+      { icon: '◈', name: '/compact', desc: 'Summarize older context', key: '' },
+      { icon: '◉', name: '/know', desc: 'Browse project memory', key: '' },
+      { icon: '⌁', name: '/skill', desc: 'Install or list skills', key: '' },
+      { icon: '＋', name: '/new', desc: 'Start a new session', key: 'ctrl+n' },
+      { icon: '☰', name: '/sessions', desc: 'List recent sessions', key: '' },
+      { icon: '⌘', name: '/doctor', desc: 'Show doctor output', key: '' }
+    ];
+
+    const files = [
+      { icon: '⌁', name: 'src/atlas/tui.py', desc: 'terminal frontend', key: '' },
+      { icon: '⌁', name: 'src/atlas/agent.py', desc: 'agent loop', key: '' },
+      { icon: '⌁', name: 'src/atlas/llm.py', desc: 'OpenAI-compatible client', key: '' },
+      { icon: '⌁', name: 'docs/m0-task-board.md', desc: 'task board', key: '' }
+    ];
+
+    let mode = null;
+    let selected = 0;
+
+    function render(query = '') {
+      const source = mode === 'files' ? files : commands;
+      const q = query.toLowerCase();
+      const matches = source.filter(item => item.name.toLowerCase().includes(q) || item.desc.toLowerCase().includes(q));
+      selected = 0;
+      items.innerHTML = matches.map((item, index) => `
+        <div class="palette-item ${index === 0 ? 'selected' : ''}" data-value="${item.name}">
+          <span class="palette-icon">${item.icon}</span>
+          <span><span class="palette-name">${item.name}</span><div class="palette-desc">${item.desc}</div></span>
+          <span class="palette-key">${item.key || ''}</span>
+        </div>
+      `).join('') || '<div class="palette-item"><span></span><span class="palette-desc">No matches</span><span></span></div>';
+      palette.hidden = false;
+    }
+
+    function openPalette(nextMode, query) {
+      mode = nextMode;
+      render(query);
+    }
+
+    function closePalette() {
+      mode = null;
+      palette.hidden = true;
+    }
+
+    input.addEventListener('keydown', (event) => {
+      if (event.key === '/') {
+        event.preventDefault();
+        openPalette('commands', '');
+        input.value = '/';
+        return;
+      }
+      if (event.key === '#') {
+        event.preventDefault();
+        openPalette('files', '');
+        input.value = '#';
+        return;
+      }
+      if (event.key === 'Escape') {
+        if (!palette.hidden) {
+          event.preventDefault();
+          closePalette();
+          input.value = '';
+        }
+        return;
+      }
+      if (event.key === 'Enter' && !palette.hidden) {
+        event.preventDefault();
+        const chosen = items.querySelector('.palette-item.selected .palette-name');
+        if (chosen) {
+          input.value = chosen.textContent;
+          closePalette();
+        }
+        return;
+      }
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        if (palette.hidden) return;
+        event.preventDefault();
+        const nodes = [...items.querySelectorAll('.palette-item')];
+        if (!nodes.length) return;
+        nodes.forEach(node => node.classList.remove('selected'));
+        selected = (selected + (event.key === 'ArrowDown' ? 1 : -1) + nodes.length) % nodes.length;
+        nodes[selected].classList.add('selected');
+        return;
+      }
+      if (!palette.hidden) {
+        const value = input.value;
+        const marker = mode === 'files' ? '#' : '/';
+        const index = value.lastIndexOf(marker);
+        render(index >= 0 ? value.slice(index + 1) : '');
+      }
+    });
+
+    items.addEventListener('mousedown', (event) => {
+      const row = event.target.closest('.palette-item');
+      if (!row || !row.dataset.value) return;
+      event.preventDefault();
+      input.value = (mode === 'files' ? '#' : '') + row.dataset.value + (mode === 'files' ? ' ' : '');
+      input.focus();
+      closePalette();
+    });
+
+    document.querySelector('.composer').addEventListener('click', () => input.focus());
+  </script>
+</body>
+</html>

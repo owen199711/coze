@@ -1,0 +1,33 @@
+version: 1
+project:
+  name: atlas-demo
+  root: .
+  languages: [python]
+  commands:
+    test: python -m pytest -q
+    lint: ruff check .
+    typecheck: mypy src
+    format: ruff format .
+  modules:
+    - id: app
+      path: .
+
+style:
+  profile: pep8-ruff
+
+learning:
+  enabled: true
+  idle_minutes: 15
+  budget:
+    max_cost_usd_per_night: 2.0
+
+permissions:
+  mode: accept_edits
+
+model:
+  provider: openai-compatible
+  name: ""
+  api_base: https://api.openai.com/v1
+  api_key_env: OPENAI_API_KEY
+  max_turns: 12
+  max_cost_usd: 5.0

@@ -1,0 +1,68 @@
+{
+  "name": "atlas-vscode",
+  "displayName": "Atlas Coding Agent",
+  "description": "Minimal VSCode client for the local Atlas coding agent daemon.",
+  "version": "0.0.1",
+  "publisher": "atlas-local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["AI", "Programming Languages"],
+  "extensionKind": ["workspace"],
+  "activationEvents": [
+    "onCommand:atlas.chat",
+    "onCommand:atlas.doctor",
+    "onCommand:atlas.init",
+    "onCommand:atlas.startServer"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "atlas.chat",
+        "title": "Atlas: Chat"
+      },
+      {
+        "command": "atlas.doctor",
+        "title": "Atlas: Doctor"
+      },
+      {
+        "command": "atlas.init",
+        "title": "Atlas: Initialize Project"
+      },
+      {
+        "command": "atlas.startServer",
+        "title": "Atlas: Start Local Server"
+      }
+    ],
+    "configuration": {
+      "title": "Atlas",
+      "properties": {
+        "atlas.endpoint": {
+          "type": "string",
+          "default": "http://127.0.0.1:8765",
+          "description": "Atlas JSON-RPC endpoint."
+        },
+        "atlas.token": {
+          "type": "string",
+          "default": "",
+          "description": "Optional bearer token (ATLAS_TOKEN)."
+        },
+        "atlas.executable": {
+          "type": "string",
+          "default": "atlas",
+          "description": "Path to the atlas CLI executable."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p ."
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}
