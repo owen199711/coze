@@ -14,7 +14,7 @@ from rich.text import Text
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Collapsible, Input, OptionList, Static
+from textual.widgets import Collapsible, Input, Markdown as MarkdownWidget, OptionList, Static
 from textual.widgets.option_list import Option
 
 from .config import ConfigError
@@ -86,6 +86,11 @@ class MessageLog(VerticalScroll):
         self.call_after_refresh(self.scroll_end, animate=False)
         return block, body_widget
 
+    def write_markdown(self, text: str, classes: str = "message") -> None:
+        widget = MarkdownWidget(text, classes=classes)
+        self.mount(widget)
+        self.call_after_refresh(self.scroll_end, animate=False)
+
     def write_user(self, content: str) -> None:
         stamp = datetime.now().strftime("%H:%M")
         label = Static(
@@ -99,7 +104,7 @@ class MessageLog(VerticalScroll):
         self.mount(label, body)
         self.call_after_refresh(self.scroll_end, animate=False)
 
-    def write_assistant(self, content: Any) -> None:
+    def write_assistant(self, content: str) -> None:
         stamp = datetime.now().strftime("%H:%M")
         label = Static(
             Text.assemble(
@@ -108,7 +113,7 @@ class MessageLog(VerticalScroll):
             ),
             classes="msg-label",
         )
-        body = Static(content, classes="msg-assistant")
+        body = MarkdownWidget(content, classes="msg-assistant")
         self.mount(label, body)
         self.call_after_refresh(self.scroll_end, animate=False)
 
@@ -336,26 +341,24 @@ class AtlasTUI(App[None]):
         self._status.update(self._status_text())
 
     def _help(self) -> None:
-        self._chat.write(
-            Markdown(
-                "### Commands\n\n"
-                "| command | meaning |\n"
-                "|---|---|\n"
-                "| `/help` | show this help |\n"
-                "| `/compact` | summarize old context |\n"
-                "| `/new` | start a new session |\n"
-                "| `/sessions` | list recent sessions |\n"
-                "| `/know [query]` | list or search project memory |\n"
-                "| `/skill list` | list installed skills |\n"
-                "| `/skill install <path-or-url>` | install a skill |\n"
-                "| `/skill remove <name>` | remove a skill |\n"
-                "| `/doctor` | show Atlas doctor JSON |\n"
-                "| `/knowledge <query>` | search project knowledge |\n"
-                "| `/clear` | clear the screen |\n"
-                "| `/exit` | quit |\n\n"
-                "Type `/` to pick a command, `#` to pick a workspace file.\n\n"
-                "`Ctrl+N` new session · `Ctrl+Q` quit · `F1` help · `Esc Esc` quit"
-            )
+        self._chat.write_markdown(
+            "### Commands\n\n"
+            "| command | meaning |\n"
+            "|---|---|\n"
+            "| `/help` | show this help |\n"
+            "| `/compact` | summarize old context |\n"
+            "| `/new` | start a new session |\n"
+            "| `/sessions` | list recent sessions |\n"
+            "| `/know [query]` | list or search project memory |\n"
+            "| `/skill list` | list installed skills |\n"
+            "| `/skill install <path-or-url>` | install a skill |\n"
+            "| `/skill remove <name>` | remove a skill |\n"
+            "| `/doctor` | show Atlas doctor JSON |\n"
+            "| `/knowledge <query>` | search project knowledge |\n"
+            "| `/clear` | clear the screen |\n"
+            "| `/exit` | quit |\n\n"
+            "Type `/` to pick a command, `#` to pick a workspace file.\n\n"
+            "`Ctrl+N` new session · `Ctrl+Q` quit · `F1` help · `Esc Esc` quit"
         )
 
     def _hide_palette(self) -> None:
@@ -682,7 +685,7 @@ class AtlasTUI(App[None]):
 
     def _flush_stream(self) -> None:
         if self._stream_buffer.strip():
-            self._chat.write(Markdown(self._stream_buffer))
+            self._chat.write_markdown(self._stream_buffer)
         self._stream_buffer = ""
         self._stream.display = False
 
@@ -693,7 +696,7 @@ class AtlasTUI(App[None]):
         if not content:
             self._chat.write(Text("(empty reply)", style="dim"))
             return
-        self._chat.write_assistant(Markdown(content))
+        self._chat.write_assistant(content)
 
     def _on_agent_event(self, event_type: str, payload: dict[str, Any]) -> None:
         if event_type == "tool.call":
