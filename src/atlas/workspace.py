@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import fnmatch
+import ipaddress
 import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .config import AtlasConfig
 from .models import ToolResult
@@ -26,19 +29,109 @@ SKIP_DIRS = {
     "build",
 }
 MAX_READ_LINES = 400
+MAX_READ_BYTES = 2_000_000
 MAX_OUTPUT = 12000
 
+# Files/directories that must not be exposed to the model even though they live
+# inside the workspace. `.atlas/skills` is the one exception: installed skills
+# are meant to be read on demand.
+SENSITIVE_DIRS = {".git"}
+SENSITIVE_FILE_PATTERNS = (
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "id_rsa",
+    "id_ed25519",
+    ".npmrc",
+    ".pypirc",
+    "credentials",
+    "credentials.*",
+    "secrets.*",
+)
+
 DANGEROUS_PATTERNS = [
-    r"rm\s+-rf\s+/(?:\s|$)",
+    r"rm\s+-(?:rf|fr)\s+/(?:\s|$|\*)",
+    r"rm\s+-r\s+-f\s+/(?:\s|$|\*)",
     r"rm\s+-rf\s+~",
+    r"rm\s+-rf\s+\$HOME",
     r"git\s+push\s+--force",
     r"git\s+push\s+-f",
     r"git\s+reset\s+--hard",
+    r"git\s+clean\s+-[a-z]*f",
     r"shutdown\b",
+    r"reboot\b",
     r"mkfs\b",
     r"format\s+[a-zA-Z]:",
+    r"del\s+/[sq]\b",
+    r"rd\s+/s\b",
     r":\(\)\s*\{\s*:\|:&\s*\};:",
 ]
+
+
+def is_public_http_url(url: str) -> bool:
+    """Reject loopback/private/link-local targets before server-side fetches.
+
+    This blocks the common SSRF targets (localhost, RFC1918, cloud metadata,
+    `.internal` DNS). DNS rebinding is out of scope for this local MVP, but the
+    resolved addresses are checked before the request is made.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, parsed.port or 443, proto=socket.IPPROTO_TCP)
+    except (OSError, socket.gaierror):
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(str(info[4][0]).split("%", 1)[0])
+        except ValueError:
+            return False
+        if (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_multicast
+            or address.is_unspecified
+        ):
+            return False
+    return True
+
+
+def is_sensitive_path(
+    path: str | Path,
+    root: str | Path,
+    *,
+    allow_skills: bool = False,
+) -> bool:
+    """True when a path must stay out of model-visible tools.
+
+    The workspace boundary is not enough: `.git` allows hook persistence, and
+    `.env`/key files are common secret locations. Installed skills under
+    `.atlas/skills` are explicitly readable when `allow_skills` is set.
+    """
+    root_path = Path(root).resolve()
+    try:
+        relative = Path(path).resolve().relative_to(root_path)
+    except (OSError, ValueError):
+        return True
+    parts = [part.lower() for part in relative.parts]
+    if not parts:
+        return False
+    if parts[0] == ".git":
+        return True
+    if parts[0] == ".atlas":
+        if allow_skills and len(parts) >= 3 and parts[1] == "skills" and parts[-1].endswith(".md"):
+            return False
+        return True
+    name = parts[-1]
+    return any(fnmatch.fnmatch(name, pattern) for pattern in SENSITIVE_FILE_PATTERNS)
 
 
 class Workspace:
@@ -68,19 +161,45 @@ class Workspace:
         return any(part in SKIP_DIRS for part in relative.parts)
 
     # ----------------------------------------------------------------- read
+    def _read_text(self, target: Path) -> str:
+        with target.open("r", encoding="utf-8", newline="") as handle:
+            return handle.read()
+
+    def _write_text(self, target: Path, text: str, newline: str = "\n") -> None:
+        # Preserve the file's original line endings. Writing with text mode and
+        # newline=None would silently turn LF files into CRLF on Windows.
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        with target.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(normalized.replace("\n", newline))
+
     def read(self, path: str, start: int | None = None, end: int | None = None) -> ToolResult:
         target = self.resolve(path)
+        if is_sensitive_path(target, self.root, allow_skills=True):
+            return ToolResult("error", f"sensitive path denied: {path}", {"path": path})
         if not target.exists():
             return ToolResult("error", f"file not found: {path}", {"path": path})
         if target.is_dir():
             return ToolResult("error", f"is a directory: {path}", {"path": path})
         try:
-            text = target.read_text(encoding="utf-8")
+            if target.stat().st_size > MAX_READ_BYTES and start is None and end is None:
+                return ToolResult(
+                    "error",
+                    f"file too large to read whole ({target.stat().st_size} bytes); "
+                    "specify start/end lines",
+                    {"path": path, "size": target.stat().st_size},
+                )
+            text = self._read_text(target)
         except UnicodeDecodeError:
             return ToolResult("error", f"binary file: {path}", {"path": path})
         lines = text.splitlines()
         total = len(lines)
         start_idx = max(0, (start or 1) - 1)
+        if start_idx >= total:
+            return ToolResult(
+                "error",
+                f"start line {start} exceeds file length {total}: {path}",
+                {"path": path, "total_lines": total},
+            )
         end_idx = min(total, end or total)
         selected = lines[start_idx:end_idx]
         truncated = len(selected) > MAX_READ_LINES
@@ -111,6 +230,8 @@ class Workspace:
         create_parents: bool = True,
     ) -> ToolResult:
         target = self.resolve(path)
+        if is_sensitive_path(target, self.root):
+            return ToolResult("error", f"sensitive path denied: {path}", {"path": path})
         if mode == "create":
             if target.exists():
                 return ToolResult("error", f"file already exists: {path}")
@@ -118,18 +239,23 @@ class Workspace:
                 return ToolResult("error", "content is required for create")
             if create_parents:
                 target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
+            self._write_text(target, content, "\n")
             self._clear_bytecode(target)
             return ToolResult("ok", f"created {path}", {"path": path, "bytes": len(content)})
 
         if not target.exists():
             return ToolResult("error", f"file not found: {path}")
-        before = target.read_text(encoding="utf-8")
+        try:
+            before = self._read_text(target)
+        except UnicodeDecodeError:
+            return ToolResult("error", f"binary file: {path}", {"path": path})
+        newline = "\r\n" if "\r\n" in before else "\n"
+        before_normalized = before.replace("\r\n", "\n")
 
         if mode == "replace":
             if content is None:
                 return ToolResult("error", "content is required for replace")
-            target.write_text(content, encoding="utf-8")
+            self._write_text(target, content, newline)
             self._clear_bytecode(target)
             return ToolResult(
                 "ok",
@@ -140,7 +266,8 @@ class Workspace:
         if mode == "replace_text":
             if old is None or new is None:
                 return ToolResult("error", "old and new are required for replace_text")
-            count = before.count(old)
+            old_normalized = old.replace("\r\n", "\n")
+            count = before_normalized.count(old_normalized)
             if count == 0:
                 return ToolResult("error", f"old text not found in {path}")
             if count > 1:
@@ -149,8 +276,8 @@ class Workspace:
                     f"old text appears {count} times; provide a unique snippet",
                     {"path": path, "occurrences": count},
                 )
-            after = before.replace(old, new, 1)
-            target.write_text(after, encoding="utf-8")
+            after = before_normalized.replace(old_normalized, new.replace("\r\n", "\n"), 1)
+            self._write_text(target, after, newline)
             self._clear_bytecode(target)
             return ToolResult("ok", f"edited {path}", {"path": path, "occurrences": 1})
 
@@ -171,9 +298,11 @@ class Workspace:
     ) -> ToolResult:
         if mode == "files":
             pattern = query or "*"
-            matches: list[str] = []
+            matches: list[Any] = []
             for path in self.root.rglob("*"):
                 if path.is_dir() or self._should_skip(path):
+                    continue
+                if is_sensitive_path(path, self.root):
                     continue
                 relative = self.relative(path)
                 if fnmatch.fnmatch(path.name, pattern) or fnmatch.fnmatch(relative, pattern):
@@ -192,9 +321,13 @@ class Workspace:
         for path in self.root.rglob("*"):
             if path.is_dir() or self._should_skip(path):
                 continue
+            if is_sensitive_path(path, self.root):
+                continue
             relative = self.relative(path)
-            if glob and not fnmatch.fnmatch(path.name, glob) and not fnmatch.fnmatch(
-                relative, glob
+            if (
+                glob
+                and not fnmatch.fnmatch(path.name, glob)
+                and not fnmatch.fnmatch(relative, glob)
             ):
                 continue
             try:
@@ -205,9 +338,7 @@ class Workspace:
                 continue
             for line_no, line in enumerate(text.splitlines(), 1):
                 if regex.search(line):
-                    matches.append(
-                        {"path": relative, "line": line_no, "text": line.strip()[:300]}
-                    )
+                    matches.append({"path": relative, "line": line_no, "text": line.strip()[:300]})
                     if len(matches) >= max_results:
                         break
             if len(matches) >= max_results:
@@ -220,8 +351,24 @@ class Workspace:
             if re.search(pattern, command, re.IGNORECASE):
                 return ToolResult("error", f"command denied by policy: {command}")
         workdir = self.resolve(cwd) if cwd else self.root
+        if is_sensitive_path(workdir, self.root):
+            return ToolResult("error", f"sensitive cwd denied: {cwd}", {"cwd": cwd})
+        try:
+            timeout = int(timeout)
+        except (TypeError, ValueError):
+            return ToolResult("error", "timeout must be an integer number of seconds")
+        if timeout <= 0:
+            return ToolResult("error", "timeout must be positive")
         started = time.monotonic()
-        env = os.environ.copy()
+        # Do not hand API keys/tokens to arbitrary model-directed commands.
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not re.search(
+                r"(?i)(api[_-]?key|token|secret|password|credential|private[_-]?key|access[_-]?key)",
+                key,
+            )
+        }
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         try:
             completed = subprocess.run(
@@ -234,6 +381,7 @@ class Workspace:
                 errors="replace",
                 env=env,
                 timeout=timeout,
+                check=False,
             )
         except subprocess.TimeoutExpired:
             return ToolResult("error", f"command timed out after {timeout}s: {command}")
@@ -256,6 +404,34 @@ class Workspace:
         )
 
     # ------------------------------------------------------------------ git
+    def _git_output(self, args: list[str], timeout: int = 30) -> str:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=str(self.root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+        return (completed.stdout or "") if completed.returncode == 0 else ""
+
+    def _git_branch(self) -> str:
+        branch = self._git_output(["symbolic-ref", "--short", "HEAD"]).strip()
+        if branch:
+            return branch
+        return self._git_output(["rev-parse", "--abbrev-ref", "HEAD"]).strip()
+
+    def _git_paths_to_stage(self, explicit: list[str]) -> list[str]:
+        if explicit and not any(item in {".", ":/", "-A", "--all"} for item in explicit):
+            return explicit
+        names: list[str] = []
+        for line in self._git_output(["status", "--porcelain"]).splitlines():
+            if len(line) > 3:
+                names.append(line[3:].strip().strip('"'))
+        return names
+
     def git(self, args: str, timeout: int = 60) -> ToolResult:
         try:
             parts = shlex.split(args, posix=(os.name != "nt"))
@@ -293,6 +469,43 @@ class Workspace:
         }
         if any(part in destructive for part in parts):
             return ToolResult("error", f"destructive git option denied: {args}")
+        if parts[0] == "branch" and any(
+            part in {"-d", "-D", "--delete", "-m", "-M", "--move"} for part in parts
+        ):
+            return ToolResult("error", f"refusing to delete/rename a branch: {args}")
+
+        if parts[0] == "add":
+            explicit = [item for item in parts[1:] if not item.startswith("-")]
+            for name in self._git_paths_to_stage(explicit):
+                if is_sensitive_path(self.root / name, self.root):
+                    return ToolResult(
+                        "error",
+                        f"refusing to stage sensitive file: {name}",
+                    )
+        if parts[0] == "commit":
+            if "--no-verify" in parts or "-n" in parts:
+                return ToolResult("error", "refusing to commit with --no-verify")
+            branch = self._git_branch()
+            if branch in {"main", "master"}:
+                return ToolResult(
+                    "error",
+                    f"refusing to commit directly on protected branch: {branch}",
+                )
+            staged = [
+                name.strip().strip('"')
+                for name in self._git_output(["diff", "--cached", "--name-only"]).splitlines()
+                if name.strip()
+            ]
+            for name in staged:
+                if is_sensitive_path(self.root / name, self.root):
+                    return ToolResult(
+                        "error",
+                        f"refusing to commit sensitive file: {name}",
+                    )
+            patch = self._git_output(["diff", "--cached", "--unified=0"])
+            if re.search(r"(?i)(sk-[a-z0-9]{10,}|api[_-]?key\s*[=:]\s*\S+)", patch[:200_000]):
+                return ToolResult("error", "refusing to commit a staged secret")
+
         completed = subprocess.run(
             ["git", *parts],
             cwd=str(self.root),
@@ -301,6 +514,7 @@ class Workspace:
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            check=False,
         )
         status = "ok" if completed.returncode == 0 else "error"
         return ToolResult(
@@ -350,10 +564,10 @@ class Workspace:
         for path in self.root.rglob("*"):
             if path.is_dir() or self._should_skip(path):
                 continue
+            if is_sensitive_path(path, self.root):
+                continue
             try:
-                files.append(
-                    {"path": self.relative(path), "size": path.stat().st_size}
-                )
+                files.append({"path": self.relative(path), "size": path.stat().st_size})
             except OSError:
                 continue
         return {"root": str(self.root), "git_sha": self.git_sha(), "files": files[:2000]}

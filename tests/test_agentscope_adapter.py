@@ -111,9 +111,7 @@ def test_agentscope_adapter_runs_tool_roundtrip(tmp_path: Path) -> None:
             if isinstance(output, str):
                 self.tool_output = output
             else:
-                self.tool_output = "\n".join(
-                    getattr(block, "text", "") for block in output
-                )
+                self.tool_output = "\n".join(getattr(block, "text", "") for block in output)
             return ChatResponse(
                 content=[TextBlock(text="read ok")],
                 is_last=True,
@@ -186,9 +184,7 @@ def test_agentscope_adapter_reads_knowledge(tmp_path: Path) -> None:
                         ToolCallBlock(
                             id="call_1",
                             name="knowledge",
-                            input=json.dumps(
-                                {"action": "search", "query": "pytest", "limit": 3}
-                            ),
+                            input=json.dumps({"action": "search", "query": "pytest", "limit": 3}),
                         )
                     ],
                     is_last=True,
@@ -199,9 +195,7 @@ def test_agentscope_adapter_reads_knowledge(tmp_path: Path) -> None:
             if isinstance(output, str):
                 self.tool_output = output
             else:
-                self.tool_output = "\n".join(
-                    getattr(block, "text", "") for block in output
-                )
+                self.tool_output = "\n".join(getattr(block, "text", "") for block in output)
             return ChatResponse(
                 content=[TextBlock(text="knowledge ok")],
                 is_last=True,
@@ -233,4 +227,3 @@ def test_agentscope_adapter_reads_knowledge(tmp_path: Path) -> None:
         assert "Run tests with pytest" in model.tool_output
     finally:
         atlas.close()
-

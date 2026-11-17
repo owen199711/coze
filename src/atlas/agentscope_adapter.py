@@ -28,6 +28,7 @@ from .tools import AtlasTools
 def is_available() -> bool:
     try:
         import agentscope  # noqa: F401
+
         return True
     except Exception:
         return False

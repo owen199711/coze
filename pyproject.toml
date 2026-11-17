@@ -16,9 +16,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.10"]
 agentscope = ["agentscope>=2.0.0"]
-tui = ["textual>=0.70"]
 
 [project.scripts]
 atlas = "atlas.cli:main"
@@ -32,3 +31,16 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+# Keep the gate small and stable; formatting is a separate opt-in command.
+select = ["E4", "E7", "E9", "F", "I"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true

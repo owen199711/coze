@@ -5,6 +5,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from .workspace import is_public_http_url
+
 
 @dataclass
 class Skill:
@@ -35,6 +37,8 @@ def _slug(value: str) -> str:
 
 def _read_source(source: str) -> tuple[str, str]:
     if source.startswith(("http://", "https://")):
+        if not is_public_http_url(source):
+            raise ValueError("skill URL must be public http(s), not loopback/private")
         request = urllib.request.Request(source, headers={"User-Agent": "atlas-skill/0.1"})
         with urllib.request.urlopen(request, timeout=30) as response:
             raw = response.read(100_001)
@@ -79,9 +83,7 @@ def list_skills(data_dir: Path) -> list[Skill]:
         meta, _body = _frontmatter(text)
         name = _slug(meta.get("name") or path.stem)
         if name:
-            result.append(
-                Skill(name=name, description=meta.get("description") or "", path=path)
-            )
+            result.append(Skill(name=name, description=meta.get("description") or "", path=path))
     return result
 
 

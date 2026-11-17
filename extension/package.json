@@ -13,7 +13,8 @@
     "onCommand:atlas.chat",
     "onCommand:atlas.doctor",
     "onCommand:atlas.init",
-    "onCommand:atlas.startServer"
+    "onCommand:atlas.startServer",
+    "onCommand:atlas.setToken"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -33,6 +34,10 @@
       {
         "command": "atlas.startServer",
         "title": "Atlas: Start Local Server"
+      },
+      {
+        "command": "atlas.setToken",
+        "title": "Atlas: Set Token"
       }
     ],
     "configuration": {
@@ -46,7 +51,12 @@
         "atlas.token": {
           "type": "string",
           "default": "",
-          "description": "Optional bearer token (ATLAS_TOKEN)."
+          "description": "Deprecated bearer token (use Atlas: Set Token / SecretStorage instead)."
+        },
+        "atlas.requestTimeoutMs": {
+          "type": "number",
+          "default": 300000,
+          "description": "Timeout for a single JSON-RPC request, in milliseconds."
         },
         "atlas.executable": {
           "type": "string",

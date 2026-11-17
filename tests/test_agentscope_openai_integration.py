@@ -17,20 +17,14 @@ def _chunk(delta: dict, finish: str | None = None, usage: dict | None = None) ->
         "object": "chat.completion.chunk",
         "created": 0,
         "model": "fake",
-        "choices": (
-            []
-            if usage
-            else [{"index": 0, "delta": delta, "finish_reason": finish}]
-        ),
+        "choices": ([] if usage else [{"index": 0, "delta": delta, "finish_reason": finish}]),
     }
     if usage:
         payload["usage"] = usage
     return payload
 
 
-def test_agentscope_adapter_with_openai_compatible_stream(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_agentscope_adapter_with_openai_compatible_stream(tmp_path: Path, monkeypatch) -> None:
     # A machine-wide HTTP proxy can otherwise hijack 127.0.0.1 requests.
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
     monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
@@ -81,9 +75,7 @@ def test_agentscope_adapter_with_openai_compatible_stream(
                                     "type": "function",
                                     "function": {
                                         "name": "read",
-                                        "arguments": json.dumps(
-                                            {"path": "AGENTS.md"}
-                                        ),
+                                        "arguments": json.dumps({"path": "AGENTS.md"}),
                                     },
                                 }
                             ],
@@ -118,14 +110,10 @@ def test_agentscope_adapter_with_openai_compatible_stream(
     thread.start()
     atlas = None
     try:
-        (tmp_path / "AGENTS.md").write_text(
-            "# Probe rules\nBe careful.\n", encoding="utf-8"
-        )
+        (tmp_path / "AGENTS.md").write_text("# Probe rules\nBe careful.\n", encoding="utf-8")
         atlas = Atlas.init(tmp_path, name="agentscope-openai-test")
         session = atlas.create_session("agentscope")
-        tools = AtlasTools(
-            atlas.workspace, atlas.knowledge, atlas.config, session["id"]
-        )
+        tools = AtlasTools(atlas.workspace, atlas.knowledge, atlas.config, session["id"])
         model = OpenAIChatModel(
             credential=OpenAICredential(
                 api_key="sk-test",
@@ -135,24 +123,15 @@ def test_agentscope_adapter_with_openai_compatible_stream(
             stream=True,
         )
 
-        result = run_once(
-            model, tools, atlas.config, session["id"], "read AGENTS.md"
-        )
-        second = run_once(
-            model, tools, atlas.config, session["id"], "read AGENTS.md again"
-        )
+        result = run_once(model, tools, atlas.config, session["id"], "read AGENTS.md")
+        second = run_once(model, tools, atlas.config, session["id"], "read AGENTS.md again")
 
         assert result == "read ok"
         assert second == "read ok"
         assert len(Handler.requests) == 4
-        first_tools = {
-            item["function"]["name"] for item in Handler.requests[0]["tools"]
-        }
+        first_tools = {item["function"]["name"] for item in Handler.requests[0]["tools"]}
         assert len(first_tools) == 12
-        assert any(
-            message.get("role") == "tool"
-            for message in Handler.requests[1]["messages"]
-        )
+        assert any(message.get("role") == "tool" for message in Handler.requests[1]["messages"])
     finally:
         if atlas is not None:
             atlas.close()

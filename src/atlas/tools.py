@@ -4,13 +4,12 @@ import json
 import re
 import urllib.request
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Any, Callable
 
 from .config import AtlasConfig
 from .knowledge import KnowledgeService
 from .models import KnowledgeItem, SourceRef, ToolResult
-from .workspace import Workspace
+from .workspace import Workspace, is_public_http_url
 
 
 @dataclass
@@ -53,7 +52,51 @@ class AtlasTools:
         self.session_id = session_id
         self.ask_user_cb = ask_user
         self.plan_path = config.plans_dir / f"{session_id}.md"
+        self.permission_mode = config.permission_mode
+        self._read_paths: set[str] = set()
         self._specs = self._build()
+
+    def _path_key(self, path: str) -> str:
+        try:
+            resolved = self.workspace.resolve(path)
+            return resolved.relative_to(self.workspace.root).as_posix()
+        except (OSError, ValueError):
+            return path
+
+    def _explore_denied(self, action: str) -> ToolResult | None:
+        if self.permission_mode == "explore":
+            return ToolResult(
+                "error",
+                f"{action} is disabled in explore mode; switch permissions.mode to "
+                "accept_edits, dont_ask, or default",
+            )
+        return None
+
+    def _approval_denied(self, spec: ToolSpec, args: dict[str, Any]) -> ToolResult | None:
+        """Gate non-read-only tools in `default` mode (ADR-0003).
+
+        `accept_edits` and `dont_ask` skip approval; `explore` is handled by the
+        per-handler checks. In `default` mode a write requires an explicit yes
+        from the user; without an interactive callback we fail closed.
+        """
+        if self.permission_mode != "default" or spec.read_only:
+            return None
+        if not self.ask_user_cb:
+            return ToolResult(
+                "error",
+                f"{spec.name} requires approval in default mode but no interactive "
+                "input is available; switch permission_mode to accept_edits or dont_ask",
+                {"tool": spec.name},
+            )
+        question = f"Allow {spec.name} with arguments {json.dumps(args, ensure_ascii=False)}?"
+        answer = self.ask_user_cb(question, ["yes", "no"], "no")
+        if str(answer).strip().lower() not in {"yes", "y", "allow", "approve"}:
+            return ToolResult(
+                "error",
+                f"{spec.name} was not approved by the user",
+                {"tool": spec.name, "answer": answer},
+            )
+        return None
 
     def _build(self) -> dict[str, ToolSpec]:
         specs = [
@@ -246,6 +289,9 @@ class AtlasTools:
         missing = [key for key in required if key not in args]
         if missing:
             return ToolResult("error", f"missing required arguments: {', '.join(missing)}")
+        denied = self._approval_denied(spec, args)
+        if denied is not None:
+            return denied
         try:
             return spec.handler(**args)
         except TypeError as exc:
@@ -255,7 +301,10 @@ class AtlasTools:
 
     # -------------------------------------------------------------- handlers
     def _read(self, path: str, start: int | None = None, end: int | None = None) -> ToolResult:
-        return self.workspace.read(path, start=start, end=end)
+        result = self.workspace.read(path, start=start, end=end)
+        if result.status == "ok":
+            self._read_paths.add(self._path_key(path))
+        return result
 
     def _edit(
         self,
@@ -265,18 +314,45 @@ class AtlasTools:
         old: str | None = None,
         new: str | None = None,
     ) -> ToolResult:
+        denied = self._explore_denied("edit")
+        if denied is not None:
+            return denied
+        key = self._path_key(path)
+        try:
+            exists = self.workspace.resolve(path).exists()
+        except (OSError, ValueError) as exc:
+            return ToolResult("error", str(exc), {"path": path})
+        if exists and mode != "create" and key not in self._read_paths:
+            return ToolResult(
+                "error",
+                f"read {path} before editing it (the file exists and has not been read)",
+                {"path": path},
+            )
         return self.workspace.edit(path, mode=mode, content=content, old=old, new=new)
 
     def _search(self, mode: str, query: str, glob: str | None = None) -> ToolResult:
         return self.workspace.search(mode=mode, query=query, glob=glob)
 
     def _shell(self, command: str, cwd: str | None = None, timeout: int = 120) -> ToolResult:
+        denied = self._explore_denied("shell")
+        if denied is not None:
+            return denied
         return self.workspace.shell(command, cwd=cwd, timeout=timeout)
 
     def _git(self, args: str) -> ToolResult:
+        if self.permission_mode == "explore":
+            first = (args.strip().split() or [""])[0]
+            if first not in {"status", "diff", "log", "show", "rev-parse"}:
+                return ToolResult(
+                    "error",
+                    f"git {first or 'operation'} is disabled in explore mode",
+                )
         return self.workspace.git(args)
 
     def _check(self, kind: str = "test", command: str | None = None) -> ToolResult:
+        denied = self._explore_denied("check")
+        if denied is not None:
+            return denied
         return self.workspace.check(kind=kind, command=command)
 
     def _knowledge(
@@ -293,6 +369,12 @@ class AtlasTools:
         validation: str | None = None,
         limit: int = 8,
     ) -> ToolResult:
+        if self.permission_mode == "explore" and action in {
+            "write",
+            "validate",
+            "feedback",
+        }:
+            return ToolResult("error", f"knowledge {action} is disabled in explore mode")
         if action == "search":
             hits = self.knowledge.search(
                 query or "",
@@ -341,9 +423,15 @@ class AtlasTools:
         if action == "validate":
             if not id:
                 return ToolResult("error", "id is required for validate")
+            if not validation:
+                return ToolResult(
+                    "error",
+                    "validation evidence is required to promote a candidate "
+                    "(replay/test/human result)",
+                )
             ok = self.knowledge.promote(
                 id,
-                {"method": "manual", "result": "passed", "note": validation or ""},
+                {"method": "manual", "result": "passed", "note": validation},
             )
             return ToolResult("ok" if ok else "error", "knowledge promoted" if ok else "not found")
         if action == "feedback":
@@ -357,20 +445,27 @@ class AtlasTools:
         if action == "read":
             if not self.plan_path.exists():
                 return ToolResult("error", "no plan for this session")
-            return ToolResult("ok", "current plan", {"content": self.plan_path.read_text(encoding="utf-8")})
+            return ToolResult(
+                "ok", "current plan", {"content": self.plan_path.read_text(encoding="utf-8")}
+            )
         if action == "write":
             if not content:
                 return ToolResult("error", "content is required for plan write")
             self.plan_path.parent.mkdir(parents=True, exist_ok=True)
             self.plan_path.write_text(content, encoding="utf-8")
-            return ToolResult("ok", f"plan written to {self.plan_path}", {"path": str(self.plan_path)})
+            return ToolResult(
+                "ok", f"plan written to {self.plan_path}", {"path": str(self.plan_path)}
+            )
         if action == "exit":
             if not self.plan_path.exists():
                 return ToolResult("error", "no plan to exit with")
             return ToolResult(
                 "ok",
                 "plan ready for approval",
-                {"path": str(self.plan_path), "content": self.plan_path.read_text(encoding="utf-8")},
+                {
+                    "path": str(self.plan_path),
+                    "content": self.plan_path.read_text(encoding="utf-8"),
+                },
             )
         return ToolResult("error", f"unsupported plan action: {action}")
 
@@ -395,6 +490,12 @@ class AtlasTools:
             return ToolResult("error", "url is required for web fetch")
         if not url.startswith(("http://", "https://")):
             return ToolResult("error", "only http(s) URLs are allowed")
+        if not is_public_http_url(url):
+            return ToolResult(
+                "error",
+                "refusing to fetch a private/loopback/link-local URL",
+                {"url": url},
+            )
         try:
             request = urllib.request.Request(
                 url, headers={"User-Agent": "atlas-agent/0.1 (+local)"}
@@ -406,4 +507,8 @@ class AtlasTools:
         text = re.sub(r"(?is)<(script|style).*?</\1>", " ", raw)
         text = re.sub(r"(?s)<[^>]+>", " ", text)
         text = re.sub(r"\s+", " ", text).strip()
-        return ToolResult("ok", f"fetched {len(text)} chars from {url}", {"url": url, "text": text[:20000]})
+        return ToolResult(
+            "ok",
+            f"fetched {len(text)} chars from {url} (untrusted web content)",
+            {"url": url, "text": text[:20000], "untrusted": True},
+        )

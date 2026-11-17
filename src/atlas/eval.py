@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -259,6 +259,7 @@ def run_suite(
     solver: Callable[[Path, str], None] | None = None,
     keep: bool = False,
     config_overrides: dict[str, Any] | None = None,
+    repeat: int = 1,
 ) -> dict:
     """Run each task in an isolated temp repo.
 
@@ -269,60 +270,84 @@ def run_suite(
     `config_overrides` is applied to every temp Atlas config, so the CLI can
     evaluate the model configured in the caller's project without copying a
     whole atlas.yaml into each task repo.
-    """
-    results = []
-    for task in tasks or default_tasks():
-        root = Path(tempfile.mkdtemp(prefix=f"atlas-eval-{task.id}-"))
-        atlas = None
-        try:
-            write_default_config(root, name=f"eval-{task.id}")
-            for relative, content in task.files.items():
-                target = root / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
 
-            atlas = Atlas(root)
-            if config_overrides:
-                for key, value in config_overrides.items():
-                    if hasattr(atlas.config, key):
-                        setattr(atlas.config, key, value)
-            atlas.config.test_command = task.test_command
-            if solver:
-                solver(root, task.prompt)
-            else:
+    `repeat` runs the whole suite multiple times (for variance/baseline data);
+    each attempt is returned in `results` with a `repeat` index.
+    """
+    repeat = max(1, int(repeat))
+    results = []
+    for run_index in range(repeat):
+        for task in tasks or default_tasks():
+            root = Path(tempfile.mkdtemp(prefix=f"atlas-eval-{task.id}-"))
+            atlas = None
+            try:
+                write_default_config(root, name=f"eval-{task.id}")
+                for relative, content in task.files.items():
+                    target = root / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(content, encoding="utf-8")
+                if not (root / task.test_file).is_file():
+                    raise ValueError(f"missing test fixture: {task.test_file}")
+
+                atlas = Atlas(root)
+                if config_overrides:
+                    for key, value in config_overrides.items():
+                        if hasattr(atlas.config, key):
+                            setattr(atlas.config, key, value)
+                atlas.config.test_command = task.test_command
                 session = atlas.create_session(task.name)
-                atlas.chat(session["id"], task.prompt)
-            check = atlas.workspace.check("test", task.test_command)
-            exit_code = int(check.data.get("exit_code", 1))
-            results.append(
-                {
-                    "id": task.id,
-                    "name": task.name,
-                    "passed": exit_code == 0,
-                    "exit_code": exit_code,
-                    "stdout": check.data.get("stdout", "")[-2000:],
-                    "stderr": check.data.get("stderr", "")[-2000:],
-                }
-            )
-        except Exception as exc:
-            results.append(
-                {
-                    "id": task.id,
-                    "name": task.name,
-                    "passed": False,
-                    "exit_code": None,
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-        finally:
-            if atlas is not None:
-                atlas.close()
-            if not keep:
-                shutil.rmtree(root, ignore_errors=True)
+                if solver:
+                    solver(root, task.prompt)
+                else:
+                    atlas.chat(session["id"], task.prompt)
+                check = atlas.workspace.check("test", task.test_command)
+                exit_code = int(check.data.get("exit_code", 1))
+                stdout = str(check.data.get("stdout", ""))
+                stderr = str(check.data.get("stderr", ""))
+                atlas.sessions.record_verification(
+                    session["id"],
+                    "test",
+                    task.test_command,
+                    str(root),
+                    exit_code,
+                    stdout,
+                    stderr,
+                    int(check.data.get("duration_ms", 0)),
+                )
+                results.append(
+                    {
+                        "id": task.id,
+                        "name": task.name,
+                        "repeat": run_index + 1,
+                        "passed": exit_code == 0,
+                        "exit_code": exit_code,
+                        "stdout": stdout[-2000:],
+                        "stderr": stderr[-2000:],
+                    }
+                )
+            except Exception as exc:
+                results.append(
+                    {
+                        "id": task.id,
+                        "name": task.name,
+                        "repeat": run_index + 1,
+                        "passed": False,
+                        "exit_code": None,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+            finally:
+                if atlas is not None:
+                    atlas.close()
+                if not keep:
+                    shutil.rmtree(root, ignore_errors=True)
     passed = sum(1 for r in results if r["passed"])
+    task_count = len(results) // repeat if repeat else 0
     return {
         "suite": "m0",
-        "tasks": len(results),
+        "repeat": repeat,
+        "tasks": task_count,
+        "attempts": len(results),
         "passed": passed,
         "failed": len(results) - passed,
         "pass_rate": (passed / len(results)) if results else 0.0,

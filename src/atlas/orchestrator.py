@@ -47,6 +47,9 @@ class Atlas:
     def init(cls, root: str | Path = ".", name: str | None = None) -> "Atlas":
         write_default_config(root, name=name)
         atlas = cls(root)
+        # Old databases may predate per-save retention; apply it once on an
+        # explicit init/upgrade, not on every daemon request.
+        atlas.sessions.prune_checkpoints()
         return atlas
 
     def create_session(self, title: str | None = None) -> dict[str, Any]:
@@ -137,22 +140,30 @@ class Atlas:
     # ----------------------------------------------------------------- doctor
     def doctor(self) -> dict[str, Any]:
         tables = self.db.table_names()
-        base_tables = [t for t in tables if not t.startswith("knowledge_fts")]
+        fts_names = [
+            row["name"]
+            for row in self.db.fetchall(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND sql LIKE 'CREATE VIRTUAL TABLE%'"
+            )
+        ]
+        base_tables = [table for table in tables if not table.startswith("knowledge_fts")]
         return {
             "root": str(self.config.root),
             "db": str(self.config.db_path),
             "base_tables": len(base_tables),
-            "tables": len(base_tables),
-            "fts_tables": len(tables) - len(base_tables),
+            "tables": len(base_tables) + len(fts_names),
+            "fts_tables": len(fts_names),
+            "fts_table_names": fts_names,
             "fts5": self.db.fts5_available(),
             "git": self.workspace.git_sha() is not None,
             "model_configured": bool(self.config.model_name or os.environ.get("ATLAS_MODEL")),
             "model": self.config.model_name or os.environ.get("ATLAS_MODEL") or "(not configured)",
             "api_key_env": self.config.api_key_env,
+            "max_turns": self.config.max_turns,
+            "max_tool_calls": self.config.max_tool_calls,
             "test_command": self.config.test_command,
-            "knowledge_items": sum(
-                sum(v.values()) for v in self.knowledge.stats().values()
-            ),
+            "knowledge_items": sum(sum(v.values()) for v in self.knowledge.stats().values()),
         }
 
     def close(self) -> None:

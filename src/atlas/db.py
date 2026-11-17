@@ -4,7 +4,6 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
 
-
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 
@@ -192,19 +191,44 @@ class Database:
         if self.conn is not None:
             return self.conn
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.path), check_same_thread=False)
+        conn = sqlite3.connect(str(self.path), check_same_thread=False, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=10000")
         self.conn = conn
         return conn
 
     def initialize(self) -> None:
         conn = self.connect()
         conn.executescript(SCHEMA)
+        self._repair_duplicate_turn_seqs(conn)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_session_seq ON turns(session_id, seq)"
+        )
         conn.execute("PRAGMA user_version = 1")
         conn.commit()
+
+    @staticmethod
+    def _repair_duplicate_turn_seqs(conn: sqlite3.Connection) -> None:
+        """Renumber duplicate (session_id, seq) rows before the unique index.
+
+        Older databases created before the unique index can contain duplicates
+        from concurrent writers. Order by created_at/rowid so recovery keeps a
+        deterministic order, then add the constraint.
+        """
+        duplicated = conn.execute(
+            "SELECT session_id FROM turns GROUP BY session_id, seq HAVING COUNT(*) > 1"
+        ).fetchall()
+        for row in duplicated:
+            session_id = row["session_id"]
+            ids = conn.execute(
+                "SELECT id FROM turns WHERE session_id = ? ORDER BY created_at, rowid",
+                (session_id,),
+            ).fetchall()
+            for seq, item in enumerate(ids, start=1):
+                conn.execute("UPDATE turns SET seq = ? WHERE id = ?", (seq, item["id"]))
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         return self.connect().execute(sql, tuple(params))

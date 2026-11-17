@@ -24,6 +24,14 @@ VALID_KINDS = {
 VALID_SCOPES = {"user", "project", "org"}
 VALID_STATUSES = {"candidate", "active", "stale", "retired", "quarantined"}
 VALID_SENSITIVITIES = {"public", "internal", "secret"}
+VALIDATION_PASSED = {"passed", "pass", "ok", "verified", "success"}
+
+
+def _validation_passed(validation: dict[str, Any] | None) -> bool:
+    if not isinstance(validation, dict):
+        return False
+    result = str(validation.get("result") or validation.get("status") or "").lower()
+    return result in VALIDATION_PASSED
 
 
 @dataclass
@@ -85,6 +93,14 @@ class KnowledgeService:
             raise ValueError("secret knowledge is not stored by default")
         if not item.title.strip() or not item.body.strip():
             raise ValueError("title and body are required")
+        if (
+            item.kind == "lesson"
+            and item.status == "active"
+            and not _validation_passed(item.validation)
+        ):
+            raise ValueError(
+                "lesson requires a passed validation (replay/test/human) before status=active"
+            )
 
         project_id = item.project_id if item.project_id is not None else self.project_id
         if item.scope != "project":
@@ -96,22 +112,58 @@ class KnowledgeService:
 
         existing = self.db.fetchone(
             """
-            SELECT id FROM knowledge_items
+            SELECT * FROM knowledge_items
             WHERE tenant_id = ? AND project_id = ? AND scope = ? AND kind = ? AND dedupe_key = ?
             """,
             (self.tenant_id, project_id, item.scope, item.kind, dedupe_key),
         )
         if existing:
+            existing_item = self._row_to_item(existing)
+            status = existing_item.status
+            if _validation_passed(item.validation):
+                status = "active"
+            elif item.status == "active" and status != "quarantined":
+                status = "active"
+            tags = sorted(set(existing_item.tags) | set(item.tags))
+            validation = dict(existing_item.validation or {})
+            validation.update(item.validation or {})
+            source = item.source if item.source.ref else existing_item.source
+            severity_rank = {"low": 0, "medium": 1, "high": 2}
+            severity = max(
+                (existing_item.severity, item.severity),
+                key=lambda value: severity_rank.get(value, 1),
+            )
             self.db.execute(
                 """
                 UPDATE knowledge_items
-                SET updated_at = ?, freshness_at = ?, confidence = MAX(confidence, ?)
+                SET status = ?, tags_json = ?, source_json = ?, confidence = MAX(confidence, ?),
+                    severity = ?, validation_json = ?, expires_at = COALESCE(?, expires_at),
+                    updated_at = ?, freshness_at = ?
                 WHERE id = ?
                 """,
-                (utcnow(), utcnow(), item.confidence, existing["id"]),
+                (
+                    status,
+                    json.dumps(tags, ensure_ascii=False),
+                    json.dumps(source.to_dict(), ensure_ascii=False),
+                    item.confidence,
+                    severity,
+                    json.dumps(validation, ensure_ascii=False) if validation else None,
+                    item.expires_at,
+                    utcnow(),
+                    utcnow(),
+                    existing_item.id,
+                ),
             )
+            if self._fts:
+                try:
+                    self.db.execute(
+                        "UPDATE knowledge_fts SET tags = ? WHERE item_id = ?",
+                        (" ".join(tags), existing_item.id),
+                    )
+                except Exception:
+                    pass
             self.db.commit()
-            return str(existing["id"])
+            return existing_item.id
 
         now = utcnow()
         item.id = item.id or new_id("kn")
@@ -244,7 +296,7 @@ class KnowledgeService:
         if not query:
             return []
         kinds_list = [k for k in (kinds or []) if k in VALID_KINDS] or None
-        rows: list[tuple[object, float]] = []
+        rows: list[tuple[Any, float]] = []
 
         if self._fts:
             fts_query = self._fts_query(query)
@@ -384,6 +436,8 @@ class KnowledgeService:
         return True
 
     def promote(self, item_id: str, validation: dict[str, Any] | None = None) -> bool:
+        if not _validation_passed(validation):
+            return False
         row = self.db.fetchone(
             "SELECT id FROM knowledge_items WHERE id = ? AND tenant_id = ? "
             "AND (scope != 'project' OR project_id = ?)",
@@ -391,13 +445,12 @@ class KnowledgeService:
         )
         if not row:
             return False
-        payload = validation or {"method": "manual", "result": "passed"}
         self.db.execute(
             "UPDATE knowledge_items SET status = 'active', validation_json = ?, "
             "updated_at = ? WHERE id = ? AND tenant_id = ? "
             "AND (scope != 'project' OR project_id = ?)",
             (
-                json.dumps(payload, ensure_ascii=False),
+                json.dumps(validation, ensure_ascii=False),
                 utcnow(),
                 item_id,
                 self.tenant_id,
@@ -420,9 +473,7 @@ class KnowledgeService:
                 self.db.execute("DELETE FROM knowledge_fts WHERE item_id = ?", (item_id,))
             except Exception:
                 pass
-        self.db.execute(
-            "DELETE FROM knowledge_chunks WHERE item_id = ?", (item_id,)
-        )
+        self.db.execute("DELETE FROM knowledge_chunks WHERE item_id = ?", (item_id,))
         cur = self.db.execute(
             "DELETE FROM knowledge_items WHERE id = ? AND tenant_id = ? "
             "AND (scope != 'project' OR project_id = ?)",

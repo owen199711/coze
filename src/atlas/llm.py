@@ -2,16 +2,41 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from .config import AtlasConfig, ConfigError
+
+RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
 
 class ModelError(RuntimeError):
     pass
+
+
+class MaxTurnsExceeded(ModelError):
+    """Raised when a turn needs more LLM calls than `max_turns` allows.
+
+    See docs/adr/ADR-0002-max-turns-semantics.md. Carries the partial
+    conversation so a caller can resume without losing evidence.
+    """
+
+    def __init__(
+        self,
+        max_turns: int,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> None:
+        super().__init__(
+            f"max_turns ({max_turns}) exceeded: the agent needed more than "
+            f"{max_turns} model calls to finish this turn. Raise "
+            "model.max_turns or resume with the returned messages."
+        )
+        self.max_turns = max_turns
+        self.messages = list(messages or [])
 
 
 @dataclass
@@ -37,6 +62,8 @@ class OpenAICompatibleClient:
         model: str,
         timeout: int = 120,
         temperature: float = 0.1,
+        max_retries: int = 2,
+        retry_backoff: float = 0.5,
     ):
         if not model:
             raise ConfigError("model.name is empty; set it in atlas.yaml or ATLAS_MODEL")
@@ -45,6 +72,29 @@ class OpenAICompatibleClient:
         self.model = model
         self.timeout = timeout
         self.temperature = temperature
+        self.max_retries = max(0, int(max_retries))
+        self.retry_backoff = max(0.0, float(retry_backoff))
+
+    def _open(self, request: urllib.request.Request):
+        """Open a request with bounded retries on transient provider errors."""
+        last: ModelError | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                return urllib.request.urlopen(request, timeout=self.timeout)
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")[:1000]
+                last = ModelError(f"model HTTP {exc.code}: {body}")
+                if exc.code in RETRYABLE_STATUS and attempt < self.max_retries:
+                    time.sleep(self.retry_backoff * (2**attempt))
+                    continue
+                raise last from exc
+            except Exception as exc:
+                last = ModelError(f"model request failed: {exc}")
+                if attempt < self.max_retries:
+                    time.sleep(self.retry_backoff * (2**attempt))
+                    continue
+                raise last from exc
+        raise last or ModelError("model request failed")
 
     @classmethod
     def from_config(cls, config: AtlasConfig) -> "OpenAICompatibleClient":
@@ -52,7 +102,8 @@ class OpenAICompatibleClient:
         if not model:
             raise ConfigError("model.name is empty; set it in atlas.yaml or ATLAS_MODEL")
         api_key = os.environ.get(config.api_key_env, "")
-        local = any(host in config.api_base for host in ("localhost", "127.0.0.1", "0.0.0.0"))
+        host = (urlparse(config.api_base).hostname or "").lower()
+        local = host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".localhost")
         if not api_key and not local:
             raise ConfigError(
                 f"missing API key: set {config.api_key_env}, or point api_base at a local endpoint"
@@ -86,13 +137,12 @@ class OpenAICompatibleClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with self._open(request) as response:
                 data = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")[:1000]
-            raise ModelError(f"model HTTP {exc.code}: {body}") from exc
+        except ModelError:
+            raise
         except Exception as exc:
-            raise ModelError(f"model request failed: {exc}") from exc
+            raise ModelError(f"invalid model response: {exc}") from exc
 
         try:
             message = data["choices"][0]["message"]
@@ -144,7 +194,7 @@ class OpenAICompatibleClient:
         usage: dict[str, Any] = {}
         last_data: dict[str, Any] | None = None
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with self._open(request) as response:
                 for raw_line in response:
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line or line.startswith(":"):
@@ -189,12 +239,9 @@ class OpenAICompatibleClient:
                             if function.get("name"):
                                 entry["function"]["name"] += str(function["name"])
                             if function.get("arguments"):
-                                entry["function"]["arguments"] += str(
-                                    function["arguments"]
-                                )
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")[:1000]
-            raise ModelError(f"model HTTP {exc.code}: {body}") from exc
+                                entry["function"]["arguments"] += str(function["arguments"])
+        except ModelError:
+            raise
         except Exception as exc:
             raise ModelError(f"model stream failed: {exc}") from exc
 

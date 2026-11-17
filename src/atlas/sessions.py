@@ -2,17 +2,30 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+import sqlite3
+import threading
+import time
+from typing import Any, List
 
 from .db import Database
 from .models import new_id, utcnow
 
 
 class SessionStore:
+    # Checkpoints store the full message list; keeping every tool-round
+    # checkpoint makes a long session grow quadratically. Recovery only needs a
+    # handful of recent snapshots.
+    CHECKPOINT_KEEP = 50
+
     def __init__(self, db: Database):
         self.db = db
+        # Same-process serialization. Cross-process writers are serialized by
+        # BEGIN IMMEDIATE plus the UNIQUE(session_id, seq) index.
+        self._lock = threading.RLock()
 
-    def create(self, project_id: str, title: str | None = None, model: str | None = None) -> dict[str, Any]:
+    def create(
+        self, project_id: str, title: str | None = None, model: str | None = None
+    ) -> dict[str, Any]:
         session_id = new_id("ses")
         now = utcnow()
         self.db.execute(
@@ -27,6 +40,17 @@ class SessionStore:
         row = self.db.fetchone("SELECT * FROM sessions WHERE id = ?", (session_id,))
         return dict(row) if row else None
 
+    def rename(self, session_id: str, title: str) -> bool:
+        title = " ".join(title.split())[:80].strip()
+        if not title:
+            return False
+        self.db.execute(
+            "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
+            (title, utcnow(), session_id),
+        )
+        self.db.commit()
+        return True
+
     def list(self, project_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         if project_id:
             rows = self.db.fetchall(
@@ -40,32 +64,55 @@ class SessionStore:
         return [dict(r) for r in rows]
 
     def append_turn(self, session_id: str, role: str, content: str) -> str:
-        row = self.db.fetchone(
-            "SELECT COALESCE(MAX(seq), 0) AS n FROM turns WHERE session_id = ?",
-            (session_id,),
-        )
-        seq = int(row["n"]) + 1 if row else 1
-        turn_id = new_id("trn")
-        now = utcnow()
-        self.db.execute(
-            "INSERT INTO turns(id, session_id, seq, role, content, status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, 'done', ?)",
-            (turn_id, session_id, seq, role, content, now),
-        )
-        self.db.execute(
-            "UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id)
-        )
-        self.db.commit()
-        return turn_id
+        with self._lock:
+            for attempt in range(6):
+                conn = self.db.connect()
+                try:
+                    if conn.in_transaction:
+                        conn.commit()
+                    # Serialize the MAX(seq)+1 + INSERT pair across connections
+                    # and processes; the unique index is the final guard.
+                    conn.execute("BEGIN IMMEDIATE")
+                    row = conn.execute(
+                        "SELECT COALESCE(MAX(seq), 0) AS n FROM turns WHERE session_id = ?",
+                        (session_id,),
+                    ).fetchone()
+                    seq = int(row["n"]) + 1 if row else 1
+                    turn_id = new_id("trn")
+                    now = utcnow()
+                    conn.execute(
+                        "INSERT INTO turns(id, session_id, seq, role, content, status, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, 'done', ?)",
+                        (turn_id, session_id, seq, role, content, now),
+                    )
+                    conn.execute(
+                        "UPDATE sessions SET updated_at = ? WHERE id = ?",
+                        (now, session_id),
+                    )
+                    conn.commit()
+                    return turn_id
+                except sqlite3.IntegrityError:
+                    conn.rollback()
+                    time.sleep(0.01 * (attempt + 1))
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    if "locked" not in str(exc).lower() or attempt >= 5:
+                        raise
+                    time.sleep(0.02 * (attempt + 1))
+        raise RuntimeError(f"could not append turn to session {session_id}")
 
-    def turns(self, session_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    def turns(self, session_id: str, limit: int = 100) -> List[dict[str, Any]]:
+        # Callers ask for "the recent window" (recovery, TUI, context), so read
+        # newest-first and flip back to chronological order for the caller.
         rows = self.db.fetchall(
-            "SELECT * FROM turns WHERE session_id = ? ORDER BY seq ASC LIMIT ?",
+            "SELECT * FROM turns WHERE session_id = ? ORDER BY seq DESC LIMIT ?",
             (session_id, limit),
         )
-        return [dict(r) for r in rows]
+        return [dict(row) for row in reversed(rows)]
 
-    def event(self, session_id: str, turn_id: str | None, event_type: str, payload: dict[str, Any]) -> None:
+    def event(
+        self, session_id: str, turn_id: str | None, event_type: str, payload: dict[str, Any]
+    ) -> None:
         self.db.execute(
             "INSERT INTO events(session_id, turn_id, type, payload_json, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -73,13 +120,13 @@ class SessionStore:
         )
         self.db.commit()
 
-    def events(self, session_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    def events(self, session_id: str, limit: int = 100) -> List[dict[str, Any]]:
         rows = self.db.fetchall(
-            "SELECT * FROM events WHERE session_id = ? ORDER BY id ASC LIMIT ?",
+            "SELECT * FROM events WHERE session_id = ? ORDER BY id DESC LIMIT ?",
             (session_id, limit),
         )
         result = []
-        for row in rows:
+        for row in reversed(rows):
             item = dict(row)
             item["payload"] = json.loads(item.pop("payload_json") or "{}")
             result.append(item)
@@ -106,6 +153,13 @@ class SessionStore:
             ),
         )
         self.db.commit()
+        self.db.execute(
+            "DELETE FROM checkpoints WHERE session_id = ? AND id NOT IN ("
+            "SELECT id FROM checkpoints WHERE session_id = ? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT ?)",
+            (session_id, session_id, self.CHECKPOINT_KEEP),
+        )
+        self.db.commit()
         return checkpoint_id
 
     def latest_checkpoint(self, session_id: str) -> dict[str, Any] | None:
@@ -119,6 +173,24 @@ class SessionStore:
         item = dict(row)
         item["state"] = json.loads(item.pop("state_json") or "{}")
         return item
+
+    def prune_checkpoints(self) -> int:
+        """Apply the retention window to every session (including old DBs)."""
+        cursor = self.db.execute(
+            """
+            DELETE FROM checkpoints WHERE id NOT IN (
+              SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                  PARTITION BY session_id ORDER BY created_at DESC, rowid DESC
+                ) AS rn
+                FROM checkpoints
+              ) WHERE rn <= ?
+            )
+            """,
+            (self.CHECKPOINT_KEEP,),
+        )
+        self.db.commit()
+        return int(cursor.rowcount or 0)
 
     def load_state(self, session_id: str) -> dict[str, Any] | None:
         checkpoint = self.latest_checkpoint(session_id)
@@ -140,9 +212,7 @@ class SessionStore:
             return None
         return {
             "messages": [
-                {"role": t["role"], "content": t["content"]}
-                for t in turns
-                if t["content"]
+                {"role": t["role"], "content": t["content"]} for t in turns if t["content"]
             ]
         }
 
@@ -180,13 +250,22 @@ class SessionStore:
         self.db.commit()
         return verification_id
 
-    def record_usage(self, session_id: str, model: str, input_tokens: int, output_tokens: int, cost_usd: float) -> None:
+    def record_usage(
+        self, session_id: str, model: str, input_tokens: int, output_tokens: int, cost_usd: float
+    ) -> None:
         self.db.execute(
             "INSERT INTO usage(id, session_id, model, input_tokens, output_tokens, cost_usd, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (new_id("usg"), session_id, model, input_tokens, output_tokens, cost_usd, utcnow()),
         )
         self.db.commit()
+
+    def session_cost(self, session_id: str) -> float:
+        row = self.db.fetchone(
+            "SELECT COALESCE(SUM(cost_usd), 0.0) AS total FROM usage WHERE session_id = ?",
+            (session_id,),
+        )
+        return float(row["total"]) if row else 0.0
 
     def save_plan(self, session_id: str, content: str) -> str:
         plan_id = new_id("pln")

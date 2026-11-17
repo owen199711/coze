@@ -10,7 +10,6 @@ from .config import write_default_config
 from .orchestrator import Atlas
 from .tools import AtlasTools
 
-
 CALC = """def add(a, b):
     # BUG: subtraction instead of addition
     return a - b

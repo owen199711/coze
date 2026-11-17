@@ -83,7 +83,7 @@ def test_curator_mines_failed_verification_as_candidate_lesson(tmp_path: Path) -
     assert atlas.knowledge.search("Failed check") == []
 
     target = next(c for c in candidates if verification_id in (c.source.ref or ""))
-    assert atlas.knowledge.promote(target.id)
+    assert atlas.knowledge.promote(target.id, {"method": "replay", "result": "passed"})
     assert atlas.knowledge.search("Failed check")
     atlas.close()
 
@@ -151,6 +151,18 @@ def test_curator_llm_without_configured_model_is_deterministic(tmp_path: Path) -
     assert target.validation is not None
     assert target.validation["method"] == "deterministic"
     atlas.close()
+
+
+def test_curator_honors_learning_enabled(tmp_path: Path) -> None:
+    atlas = Atlas.init(tmp_path, name="test")
+    atlas.config.learning_enabled = False
+    try:
+        result = CuratorJob(atlas).run_once()
+        assert result["ok"] is True
+        assert result["skipped"]
+        assert result["new_candidates"] == 0
+    finally:
+        atlas.close()
 
 
 def test_curator_cli_accepts_llm_flag() -> None:

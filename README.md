@@ -110,7 +110,9 @@ The TUI streams assistant text through the OpenAI-compatible SSE path. Tool
 calls are shown as collapsed cards; while a tool is running its title shows a
 spinner, and clicking the card expands the result. The transcript is a
 scrollable log, and long tool output scrolls inside the expanded card.
-`/session` opens a keyboard-selectable session picker (↑/↓ + Enter).
+`/session` opens a keyboard-selectable session picker (↑/↓ + Enter); the first
+user message becomes the session title, and selecting a session restores its
+user/assistant transcript in the chat view.
 `/compact` asks the configured model to summarize older messages and saves the
 reduced checkpoint. `/skill install` accepts a local `SKILL.md` or an http(s)
 URL; installed skills are listed in the system prompt and loaded on demand.
@@ -141,23 +143,23 @@ atlas chat [--session ID] [message ...]
 atlas session list
 atlas knowledge search "pytest"
 atlas knowledge add --title "Test command" --body "python -m pytest -q" --kind command
-atlas knowledge validate kn_xxx
+atlas knowledge validate kn_xxx --note "replayed in tests"
 atlas curator run [--llm]
 atlas serve --port 8765
-atlas eval
+atlas eval [--repeat 2]
 ```
 
-`atlas eval` runs 10 small golden tasks in isolated temp repos. The suite is
-validated three ways: every task starts red (0/10 before a fix), a deterministic
-reference solver turns it green (10/10), and a real DeepSeek `deepseek-chat` run
-passed **10/10** with `pass_rate=1.0`. Override the model with `--model`,
-`--api-base` and `--api-key-env`. Without a model, use `atlas demo` for the
-offline end-to-end check.
+`atlas eval` runs 10 small golden tasks in isolated temp repos. Every task is
+validated to start red; a deterministic solver is covered by tests for the
+`calc_add` task, and `--repeat` records multiple attempts. A historical DeepSeek
+run reported 10/10, but it is not reproducible offline and is not a standing
+claim. Use `atlas demo` for the offline end-to-end check.
 
 `atlas curator run` is deterministic by default. `--llm` asks the configured model
 for root-cause/prevention and falls back to the deterministic template when the
-model is missing or returns unusable JSON. It has been exercised against real
-DeepSeek; lessons stay `candidate` until a validation/replay step promotes them.
+model is missing or returns unusable JSON. Lessons stay `candidate` until a
+validation/replay step promotes them; `atlas knowledge validate` requires a
+human note, and the agent-facing tool requires validation evidence.
 
 The daemon exposes `POST /rpc` (JSON-RPC 2.0) and `GET /health`:
 
@@ -169,6 +171,7 @@ curl -s -X POST http://127.0.0.1:8765/rpc \
 ```
 
 Set `ATLAS_TOKEN` (or `--token`) to require `Authorization: Bearer <token>`.
+Binding to a non-loopback host without a token is refused at startup.
 
 ## VSCode extension (M0)
 
@@ -184,7 +187,9 @@ code --install-extension atlas-vscode-0.0.1.vsix
 ```
 
 Commands: `Atlas: Chat`, `Atlas: Doctor`, `Atlas: Initialize Project`,
-`Atlas: Start Local Server`. It is a shell; Webview/diff/plan/task panels are next.
+`Atlas: Start Local Server`, `Atlas: Set Token`. Tokens are stored in
+`SecretStorage`; requests have a configurable timeout and stale session ids are
+re-created automatically. It is still a shell; Webview/diff/plan/task panels are next.
 
 ---
 
@@ -196,18 +201,18 @@ Commands: `Atlas: Chat`, `Atlas: Doctor`, `Atlas: Initialize Project`,
 | Session / turn / event / checkpoint | ✅ |
 | Knowledge store + FTS5 search + lifecycle | ✅ |
 | 12-tool surface | ✅ 10 real, 2 stubs (lsp/subagent); web search not enabled |
-| Workspace path guard | ✅ |
-| Dangerous-command deny list | ✅ basic |
-| Test/lint/check + verification evidence | ✅ |
-| OpenAI-compatible chat loop | ✅ |
+| Workspace path guard + sensitive paths | ✅ `.git`/`.atlas`/secrets denied; skills readable |
+| Dangerous-command deny list | ✅ basic; shell env secrets are scrubbed |
+| Test/lint/check + verification evidence | ✅ `check` results are recorded in `verifications` |
+| OpenAI-compatible chat loop | ✅ retries transient 5xx; `max_turns` raises `MaxTurnsExceeded` |
 | Textual TUI (opencode-style entry) | ✅ streaming, spinner tool cards, session picker, scrollable transcript |
-| Skills (local/URL `SKILL.md` install) | ✅ descriptions in prompt; loaded on demand |
-| Context compaction (`/compact`) | ✅ model summary + reduced checkpoint |
+| Skills (local/URL `SKILL.md` install) | ✅ descriptions in prompt; loaded on demand; private URLs denied |
+| Context compaction (`/compact`) | ✅ model summary + reduced checkpoint; summary is pinned |
 | Offline end-to-end demo | ✅ |
-| Curator (deterministic consolidation/report; optional LLM RCA) | 🟡 replay validation pending |
-| JSON-RPC HTTP daemon (`/rpc`, `/health`) | ✅ |
-| Eval harness (10 tasks; real DeepSeek 10/10, pass_rate 1.0) | ✅ |
-| VSCode extension shell | 🟡 |
+| Curator (deterministic consolidation/report; optional LLM RCA) | 🟡 replay validation pending; honors `learning.enabled` |
+| JSON-RPC HTTP daemon (`/rpc`, `/health`) | ✅ per-session lock; auth on non-loopback |
+| Eval harness (10 tasks; repeatable; red baseline) | 🟡 historical 10/10 claim not reproducible offline |
+| VSCode extension shell | 🟡 chat/doctor/init/server/token; no panels |
 | AgentScope adapter | 🟡 experimental; fake/local/real DeepSeek; text-turn restore; tool-history/middleware pending |
 | Multi-repo / team server | ⏳ later |
 
@@ -228,7 +233,16 @@ One `knowledge_items` table:
 - `status`: `candidate` / `active` / `stale` / `retired` / `quarantined`
 
 This replaces three separate systems (`MemoryService`, `LessonStore`, `ProjectKnowledgeBase`).
-The `kind` decides write validation, recall policy and TTL; the `scope` decides isolation.
+`scope` decides isolation. `kind` is a classification; `lesson` requires a passed
+validation before it can be `active`, while preference/decision confirmation
+policies are still M1. `atlas knowledge validate` requires a human note.
+
+### Budgets and cost
+
+`model.max_turns` is a hard cap on LLM calls per turn (ADR-0002). `max_tool_calls`
+caps tool executions independently. Optional `input_cost_per_1m` /
+`output_cost_per_1m` prices make `usage.cost_usd` meaningful; `max_cost_usd`
+stops a session before the next model call once the recorded cost is reached.
 
 ---
 
@@ -307,10 +321,28 @@ tests/
 - No multi-tenant server, SSO, RBAC, audit export.
 - No self-evolution (L3–L6).
 - No multi-repo/service graph.
+- The 8-middleware architecture from `docs/lean-atlas-v1.md` is not implemented; the
+  default loop is a small OpenAI-compatible runtime. AgentScope is an optional adapter.
+- Plan approval/TestGate, the approval inbox, CodebaseService/LSP, task DAG and
+  streaming JSON-RPC are deferred. `plan` writes a file; it does not gate execution.
+- `permissions.mode: explore` is enforced (read-only tools, no edits/shell/git writes).
+  `default` asks for approval before non-read-only tools and fails closed without an
+  interactive callback; `accept_edits`/`dont_ask` skip the prompt. The full
+  `permissions.allow/deny` rule engine is deferred.
+- Auto memory writeback (ADR-0001) is deferred; knowledge is written via the
+  `knowledge` tool or `atlas knowledge add`.
+- Curator is manual (`atlas curator run`); the idle/nightly scheduler and per-night
+  budget (`learning.idle_minutes`, `learning.budget`) are not wired yet.
+- `project.root` is honored, but `project.modules`, `style.profile`, `project.commands.setup`
+  and the module graph are not consumed yet (CodebaseService is deferred).
 - `shell` deny list is a guard, not a security boundary; use Docker for untrusted repos.
-- `web` fetch is basic HTML-to-text; no search provider.
+- `web` fetch is basic HTML-to-text; private/loopback URLs are rejected; no search provider.
 - The TUI has basic collapsible tool cards; diff/plan panels and full interrupt handling are pending.
 - The AgentScope adapter is experimental; text-turn restoration works, but tool-call history and middleware are pending.
+- `atlas eval` uses visible fixture tests, not hidden acceptance tests; treat its
+  pass rate as a smoke signal, not a benchmark.
+- ADR-0002 (2026-11-18) changes `max_turns` to count LLM calls and raise
+  `MaxTurnsExceeded`; this is a breaking behavior change.
 
 The point of this milestone is to make the **durable core** runnable and testable before
 adding more nouns. See `docs/atlas-maturity-roadmap.md` for the path from MVP to production.

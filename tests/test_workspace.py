@@ -19,9 +19,7 @@ def test_create_read_edit(workspace: Workspace) -> None:
     assert created.status == "ok"
     read = workspace.read("hello.py")
     assert "x = 1" in read.data["content"]
-    edited = workspace.edit(
-        "hello.py", mode="replace_text", old="x = 1", new="x = 2"
-    )
+    edited = workspace.edit("hello.py", mode="replace_text", old="x = 1", new="x = 2")
     assert edited.status == "ok"
     assert "x = 2" in workspace.read("hello.py").data["content"]
 

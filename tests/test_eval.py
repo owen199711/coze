@@ -25,12 +25,31 @@ def test_eval_harness_with_solver() -> None:
 
     def solver(root: Path, _prompt: str) -> None:
         path = root / "calc.py"
-        path.write_text(path.read_text(encoding="utf-8").replace("a - b", "a + b"), encoding="utf-8")
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("a - b", "a + b"), encoding="utf-8"
+        )
 
     result = run_suite(tasks=[task], solver=solver)
     assert result["tasks"] == 1
     assert result["failed"] == 0
     assert result["results"][0]["passed"] is True
+
+
+def test_eval_harness_repeat_reports_attempts() -> None:
+    task = default_tasks()[0]
+
+    def solver(root: Path, _prompt: str) -> None:
+        path = root / "calc.py"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("a - b", "a + b"), encoding="utf-8"
+        )
+
+    result = run_suite(tasks=[task], solver=solver, repeat=2)
+    assert result["tasks"] == 1
+    assert result["repeat"] == 2
+    assert result["attempts"] == 2
+    assert result["passed"] == 2
+    assert [item["repeat"] for item in result["results"]] == [1, 2]
 
 
 def test_eval_harness_applies_config_overrides(monkeypatch) -> None:
@@ -47,7 +66,9 @@ def test_eval_harness_applies_config_overrides(monkeypatch) -> None:
 
     def solver(root: Path, _prompt: str) -> None:
         path = root / "calc.py"
-        path.write_text(path.read_text(encoding="utf-8").replace("a - b", "a + b"), encoding="utf-8")
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("a - b", "a + b"), encoding="utf-8"
+        )
 
     result = run_suite(
         tasks=[task],
@@ -95,5 +116,5 @@ def test_eval_cli_passes_model_overrides(monkeypatch, tmp_path: Path) -> None:
         "model_name": "deepseek-chat",
         "api_base": "https://api.deepseek.com",
         "api_key_env": "DEEPSEEK_API_KEY",
-        "max_turns": 12,
+        "max_turns": 10,
     }

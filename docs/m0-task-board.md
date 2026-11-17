@@ -1,7 +1,7 @@
 # M0 Task Board
 
 > Scope: Lean Atlas v1, Python M0.
-> Status: **pytest 64 passed; 10-task eval real DeepSeek 10/10 (pass_rate=1.0); curator LLM RCA opt-in with deterministic fallback and real DeepSeek validation; AgentScope text-turn restoration; wheel + VSIX built.** VSIX installation, curator replay validation, and AgentScope tool-history/middleware are not verified yet.
+> Status: **pytest 98 passed (2026-11-17); max_turns semantics aligned with ADR-0002; security/recovery hardening applied; 10-task eval repeatable and red-baseline checked; historical DeepSeek 10/10 is not reproducible offline; curator LLM RCA opt-in with deterministic fallback; AgentScope text-turn restoration; wheel + VSIX built.** VSIX installation, curator replay promotion, and AgentScope tool-history/middleware are not verified yet.
 > Rule: one task = one verifiable change; no new top-level service/table/tool without an ADR.
 
 ## Completion summary (2026-11-17)
@@ -10,7 +10,8 @@
 - 🟦 code written / partial verification: 0 tasks
 - 🟡 partial or needs IDE/scale validation: 2 tasks (M0-13, 14)
 - ⏳ not started: 0
-- **M0 core is verified**: `pytest -q` → 64 passed; real DeepSeek chat + AgentScope `run_once` + 10/10 eval; 10-task fixtures validated red→green; curator LLM RCA fake-model/fallback/real-DeepSeek validated.
+- **M0 core is verified**: `pytest -q` → 98 passed; recovery window/concurrent turns/knowledge validation/daemon auth/TUI tests added; 10-task fixtures validated red→green; curator LLM RCA fake-model/fallback validated. Historical DeepSeek results are kept as session notes, not a reproducible claim.
+- **2026-11-18 hardening**: latest-window `turns/events`; `UNIQUE(session_id, seq)` + `BEGIN IMMEDIATE` + daemon per-session lock; sensitive-path guard and read-before-edit; git main/secret guards; shell env secret scrubbing; SSRF rejection; knowledge promotion requires validation and dedupe merges state; `check` records verifications; cost/price fields, `max_cost_usd` enforcement, checkpoint retention; `MaxTurnsExceeded` (ADR-0002); permission approval gate (ADR-0003); TUI sensitive-file and busy-session fixes; extension SecretStorage/timeout/stale-session refresh; CI workflow.
 - **Not yet verified**: VSIX installation inside VSCode, curator replay promotion, AgentScope tool-history/middleware.
 
 ## Status legend
@@ -34,14 +35,14 @@
 | M0-07 | CLI (`init/doctor/demo/chat/tui/session/knowledge`) | ✅ | `src/atlas/cli.py` | real `atlas chat` + Textual TUI + demo; errors return 2 |
 | M0-08 | Offline end-to-end demo | ✅ | `src/atlas/demo.py` | red exit ≠ 0, green exit = 0, knowledge hit |
 | M0-09 | Tests written | ✅ | `tests/` | `pytest -q` passes |
-| M0-10 | Run tests & fix failures | ✅ | `tests/` | 64 passed |
+| M0-10 | Run tests & fix failures | ✅ | `tests/` | 98 passed |
 | M0-11 | Smoke `init/doctor/demo` on a clean temp dir | ✅ | — | demo `ok: true`; doctor base_tables = 15 |
 | M0-12 | AgentScope `Agent` adapter (experimental, one turn) | ✅ | `src/atlas/agentscope_adapter.py` | fake model + local SSE + real DeepSeek `run_once`; text turns restored/recorded; tool-history/middleware pending |
 | M0-12a | JSON-RPC HTTP daemon (`/rpc`, `/health`) | ✅ | `src/atlas/daemon.py` | doctor/session/knowledge dispatch |
 | M0-13 | VSCode extension shell (Chat/Doctor/Init/Server) | 🟡 | `extension/` | compiled + VSIX built; not installed in IDE |
 | M0-14 | CuratorJob (deterministic consolidation + optional LLM RCA) | 🟡 | `src/atlas/curator.py` | deterministic + fake-model + real DeepSeek LLM RCA + fallback; replay promotion next |
 | M0-15 | Packaging (wheel + VSIX + install doc) | ✅ | `dist/`, `extension/*.vsix` | clean venv install + demo passed |
-| M0-16 | 10 golden tasks + baseline metrics | ✅ | `src/atlas/eval.py` | 10 tasks; buggy 0/10, reference solver 10/10; real DeepSeek 10/10, pass_rate=1.0 |
+| M0-16 | 10 golden tasks + baseline metrics | ✅ | `src/atlas/eval.py` | 10 tasks; buggy 0/10; `calc_add` reference solver; `--repeat` attempts; historical DeepSeek 10/10 not reproducible offline |
 
 ## Next small tasks (in order)
 
@@ -88,9 +89,9 @@ without opening the session journal.
 ## Verified in this session
 
 ```text
-pytest -q                        64 passed
+pytest -q                        98 passed
 atlas init --path <tmp>          ok
-atlas doctor --path <tmp>        base_tables=15, fts5=true
+atlas doctor --path <tmp>        base_tables=15, fts_tables=1, fts5=true
 atlas demo                       red_exit=1, green_exit=0, ok=true
 atlas (no args)                  TTY -> Textual TUI; pipe -> chat
 atlas tui                        TUI mount; / palette; # file; Esc Esc; fake model
@@ -101,29 +102,28 @@ TUI tool cards                   collapsed by default; spinner while running; ex
 /skill                          install/list/remove + prompt injection
 /know                           list/search active memory
 read >4k                         bounded content preview; no blind retry
-tool loop guard                  duplicate suppression + final no-tools synthesis
-atlas curator run                report written
+tool loop guard                  duplicate suppression + max_turns exception
+atlas curator run                report written; learning.enabled honored
 atlas curator run --llm          no model -> new_candidates=1, fallback=1, llm_error set
 curator LLM RCA (fake model)     root cause/prevention candidate; validation=unvalidated
 curator LLM RCA (HTTP mock)      real OpenAI client parsed RCA; unvalidated candidate
-curator LLM RCA + DeepSeek       llm_analyzed=1; root cause/prevention; unvalidated
-atlas serve + /health + /rpc     health=true, doctor=15, knowledge add/search ok
+curator LLM RCA + DeepSeek       historical session note; unvalidated
+atlas serve + /health + /rpc     health=true, doctor=15, auth/lock tests ok
 npm run compile                  ok
-vsce package                     atlas-vscode-0.0.1.vsix
+vsce package                     historical VSIX; rebuild needed after TS changes
 pip wheel .                      atlas_agent-0.1.0-py3-none-any.whl
 clean venv install + demo        ok
 AgentScope fake-model roundtrip  read tool result + knowledge search ok
 AgentScope text-turn restore     prior context restored; new turns recorded
 AgentScope local OpenAI SSE      stream=true, tool call + final text ok
-atlas chat + DeepSeek            read tool -> "# AGENTS.md"; checkpoint; 2 turns
-DeepSeek stream                  chat_stream + on_text -> "OK"
-AgentScope + DeepSeek run_once   stream=False/True -> "deepseek-smoke"
-AgentScope + DeepSeek tool call  read pyproject.toml status=ok
-eval fixtures (10 tasks)         buggy 0/10; reference solver 10/10
-atlas eval (no model)            10 tasks enumerated, 0 passed, exit=1
-wheel in clean venv              eval_tasks=10; demo ok=true
-eval harness + DeepSeek          10/10 passed, pass_rate=1.0
-atlas eval CLI + DeepSeek        10/10; exit=0; 10 isolated temp repos
+atlas chat + DeepSeek            historical session note; checkpoint; 2 turns
+DeepSeek stream                  historical session note; chat_stream + on_text
+AgentScope + DeepSeek run_once   historical session note; stream=False/True
+AgentScope + DeepSeek tool call  historical session note; read pyproject.toml ok
+eval fixtures (10 tasks)         buggy 0/10; calc_add reference solver passes
+atlas eval (no model)            repeatable attempts; 0 passed, exit=1
+eval harness + DeepSeek          historical 10/10 (session note; not reproducible offline)
+atlas eval CLI + DeepSeek        historical 10/10; exit=0 (session note)
 ```
 
 ## Known blockers / unverified

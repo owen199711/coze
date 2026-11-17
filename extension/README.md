@@ -8,6 +8,7 @@ Minimal client for the local Atlas daemon.
 - `Atlas: Doctor` — calls `doctor` and prints the JSON.
 - `Atlas: Initialize Project` — runs `atlas init --path <workspace>`.
 - `Atlas: Start Local Server` — opens a terminal running `atlas serve --port 8765`.
+- `Atlas: Set Token` — stores the daemon bearer token in VS Code `SecretStorage`.
 
 This is intentionally a shell, not the final 4-panel UI. The next iteration adds
 Webview chat, native diff review, plan approval and the task board.
@@ -32,7 +33,8 @@ code --install-extension atlas-vscode-0.0.1.vsix
 | Setting | Default | Meaning |
 |---|---|---|
 | `atlas.endpoint` | `http://127.0.0.1:8765` | JSON-RPC daemon |
-| `atlas.token` | empty | Optional bearer token |
+| `atlas.token` | empty | Deprecated fallback; prefer `Atlas: Set Token` |
+| `atlas.requestTimeoutMs` | `300000` | Per-request timeout |
 | `atlas.executable` | `atlas` | CLI path |
 
 ## Prereqs
@@ -51,4 +53,5 @@ so in Remote SSH / WSL / Codespaces the daemon starts on the remote machine.
 - No streaming yet; chat is request/response.
 - No native diff/plan/task panel yet.
 - No Marketplace publisher; use VSIX or F5.
-- The daemon has no authentication unless `ATLAS_TOKEN` is set.
+- The daemon has no authentication by default on loopback; a non-loopback bind
+  without `ATLAS_TOKEN` is refused. Set a token and use `Atlas: Set Token`.

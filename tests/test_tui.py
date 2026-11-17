@@ -11,13 +11,13 @@ from atlas.models import KnowledgeItem
 from atlas.orchestrator import Atlas
 from atlas.skills import list_skills
 
-
 pytest.importorskip("textual")
 
 from textual.containers import VerticalScroll
 from textual.widgets import Collapsible, Input, Static
+from textual.widgets._collapsible import CollapsibleTitle
 
-from atlas.tui import AtlasTUI, MessageLog, SPINNER_FRAMES
+from atlas.tui import SPINNER_FRAMES, AtlasTUI, MessageLog
 
 
 class FakeModel:
@@ -253,6 +253,9 @@ def test_tui_tool_blocks_are_collapsible(tmp_path: Path) -> None:
                 assert any(frame in block.title for frame in SPINNER_FRAMES)
                 body = block.query_one(".tool-body", Static)
                 assert "running" in body.content.plain
+                await pilot.click(block.query_one(CollapsibleTitle))
+                await pilot.pause()
+                assert block.collapsed is False
 
                 app._on_agent_event(
                     "tool.result",
@@ -302,6 +305,24 @@ def test_tui_palette_height_is_stable_while_filtering(tmp_path: Path) -> None:
         atlas.close()
 
 
+def test_tui_long_wrapped_line_grows_stream(tmp_path: Path) -> None:
+    atlas = Atlas.init(tmp_path, name="tui-stream-wrap-test")
+    try:
+        session = atlas.create_session("tui")
+        app = AtlasTUI(atlas, session["id"])
+
+        async def run() -> None:
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.pause()
+                app._append_stream("x" * 1000)
+                await pilot.pause()
+                assert app._stream.region.height > 3
+
+        asyncio.run(run())
+    finally:
+        atlas.close()
+
+
 def test_tui_stream_renders_plain_text_live(tmp_path: Path) -> None:
     atlas = Atlas.init(tmp_path, name="tui-stream-test")
     try:
@@ -343,10 +364,12 @@ def test_tui_status_shows_busy_and_idle(tmp_path: Path) -> None:
                 busy = app._status.content.plain
                 assert "thinking" in busy
                 assert app._prompt.disabled is True
+                assert app.focused is app._chat
                 app._set_busy(False)
                 await pilot.pause()
                 assert app._prompt.disabled is False
                 assert "ready" in app._status.content.plain
+                assert app.focused is app._prompt
 
         asyncio.run(run())
     finally:
@@ -359,6 +382,8 @@ def test_tui_session_picker_switches_session(tmp_path: Path) -> None:
         first = atlas.create_session("first")
         current = atlas.create_session("current")
         other = atlas.create_session("other")
+        atlas.sessions.append_turn(other["id"], "user", "earlier context")
+        atlas.sessions.append_turn(other["id"], "assistant", "earlier answer")
         app = AtlasTUI(atlas, current["id"])
 
         async def run() -> None:
@@ -375,9 +400,67 @@ def test_tui_session_picker_switches_session(tmp_path: Path) -> None:
                 await pilot.pause()
                 assert app.session_id == other["id"]
                 assert app._palette.display is False
+                assert any(
+                    "earlier context" in str(getattr(widget, "content", ""))
+                    for widget in app._chat.query(Static)
+                )
 
         asyncio.run(run())
         assert first["id"] != app.session_id
+    finally:
+        atlas.close()
+
+
+def test_tui_session_picker_escape_restores_ready_status(tmp_path: Path) -> None:
+    atlas = Atlas.init(tmp_path, name="tui-session-escape-test")
+    try:
+        session = atlas.create_session("tui")
+        app = AtlasTUI(atlas, session["id"])
+
+        async def run() -> None:
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._show_sessions()
+                await pilot.pause()
+                assert "Select a session" in app._status.content.plain
+                await pilot.press("escape")
+                await pilot.pause()
+                assert app._palette.display is False
+                # Cancelling the picker must not leave the hint behind.
+                assert "Select a session" not in app._status.content.plain
+                assert "ready" in app._status.content.plain
+
+        asyncio.run(run())
+    finally:
+        atlas.close()
+
+
+def test_tui_session_picker_ignores_typing(tmp_path: Path) -> None:
+    atlas = Atlas.init(tmp_path, name="tui-session-typing-test")
+    try:
+        session = atlas.create_session("tui")
+        app = AtlasTUI(atlas, session["id"])
+
+        async def run() -> None:
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._show_sessions()
+                await pilot.pause()
+                await pilot.press("h")
+                await pilot.pause()
+                # Typing while picking a session should not open the command
+                # palette on top of the session list.
+                assert app._palette_mode == "session"
+                assert app._palette.display is True
+                assert all(option.id.startswith("session:") for option in app._palette.options)
+                # Esc must cancel the picker, not arm the double-Esc quit.
+                await pilot.press("escape")
+                await pilot.pause()
+                assert app._palette.display is False
+                assert app._last_escape == 0.0
+                assert "ready" in app._status.content.plain
+
+        asyncio.run(run())
     finally:
         atlas.close()
 
@@ -475,39 +558,6 @@ def test_tui_escape_while_busy_does_not_quit(tmp_path: Path) -> None:
 
 def test_tui_escape_after_busy_turn_needs_two_presses(tmp_path: Path) -> None:
     atlas = Atlas.init(tmp_path, name="tui-escape-reset-test")
-    try:
-        session = atlas.create_session("tui")
-        app = AtlasTUI(atlas, session["id"])
-
-        async def run() -> None:
-            async with app.run_test(size=(100, 30)) as pilot:
-                await pilot.pause()
-                app._set_busy(True, "Atlas is thinking...")
-                await pilot.pause()
-                await pilot.press("escape")
-                await pilot.pause()
-                await pilot.press("escape")
-                await pilot.pause()
-                assert app.is_running is True
-                app._set_busy(False)
-                await pilot.pause()
-                # The refused attempt must not leave a stale timestamp behind:
-                # the next single Esc only arms the quit, it does not fire it.
-                await pilot.press("escape")
-                await pilot.pause()
-                assert app.is_running is True
-                assert "Press Esc again" in app._status.content.plain
-                await pilot.press("escape")
-                await pilot.pause()
-                assert app.is_running is False
-
-        asyncio.run(run())
-    finally:
-        atlas.close()
-
-
-def test_tui_escape_after_busy_turn_quits_on_second_press(tmp_path: Path) -> None:
-    atlas = Atlas.init(tmp_path, name="tui-escape-stale-test")
     try:
         session = atlas.create_session("tui")
         app = AtlasTUI(atlas, session["id"])

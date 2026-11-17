@@ -24,7 +24,17 @@ class CuratorJob:
 
     def run_once(self, use_llm: bool = False) -> dict:
         self._llm_error = None
+        if not self.atlas.config.learning_enabled:
+            return {
+                "ok": True,
+                "skipped": "learning is disabled in atlas.yaml",
+                "new_candidates": 0,
+                "llm_analyzed": 0,
+                "deterministic_fallback": 0,
+                "llm_error": None,
+            }
         result = self.atlas.knowledge.consolidate()
+        pruned = self.atlas.sessions.prune_checkpoints()
         mined = self._mine_failed_verifications(use_llm=use_llm)
         stats = self.atlas.knowledge.stats()
         reports_dir = self.atlas.config.data_dir / "reports"
@@ -95,6 +105,7 @@ class CuratorJob:
             "llm_analyzed": mined["llm"],
             "deterministic_fallback": mined["fallback"],
             "llm_error": self._llm_error,
+            "pruned_checkpoints": pruned,
             **result,
         }
 
@@ -110,9 +121,7 @@ class CuratorJob:
             self._llm_error = "no model configured; using deterministic RCA"
         return self._model
 
-    def _mine_failed_verifications(
-        self, limit: int = 20, use_llm: bool = False
-    ) -> dict[str, int]:
+    def _mine_failed_verifications(self, limit: int = 20, use_llm: bool = False) -> dict[str, int]:
         """Turn recent failed checks into candidate lessons.
 
         They stay `candidate` and are not recalled until a human/validation step

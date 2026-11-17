@@ -93,6 +93,66 @@ def test_lesson_is_not_recalled_until_validated(service: KnowledgeService) -> No
     assert hits and hits[0].item.id == item_id
 
 
+def test_promote_requires_passed_validation(service: KnowledgeService) -> None:
+    item_id = service.write(
+        KnowledgeItem(
+            title="Unverified rule",
+            body="Always delete the cache before running tests.",
+            kind="lesson",
+            scope="project",
+            status="candidate",
+        )
+    )
+    assert service.promote(item_id) is False
+    assert service.promote(item_id, {"method": "replay", "result": "failed"}) is False
+    assert service.get(item_id).status == "candidate"  # type: ignore[union-attr]
+    assert service.promote(item_id, {"method": "replay", "result": "passed"}) is True
+    assert service.get(item_id).status == "active"  # type: ignore[union-attr]
+
+
+def test_active_lesson_requires_validation(service: KnowledgeService) -> None:
+    with pytest.raises(ValueError, match="lesson requires"):
+        service.write(
+            KnowledgeItem(
+                title="Unsafe lesson",
+                body="Do the dangerous thing.",
+                kind="lesson",
+                scope="project",
+                status="active",
+            )
+        )
+
+
+def test_dedupe_merges_status_validation_and_tags(service: KnowledgeService) -> None:
+    first = service.write(
+        KnowledgeItem(
+            title="Rule",
+            body="Never skip the failing test.",
+            kind="lesson",
+            scope="project",
+            status="candidate",
+        )
+    )
+    second = service.write(
+        KnowledgeItem(
+            title="Rule",
+            body="Never skip the failing test.",
+            kind="lesson",
+            scope="project",
+            status="active",
+            tags=["important"],
+            validation={"method": "replay", "result": "passed"},
+        )
+    )
+    assert first == second
+    item = service.get(first)
+    assert item is not None
+    assert item.status == "active"
+    assert item.tags == ["important"]
+    assert item.validation == {"method": "replay", "result": "passed"}
+    assert service.search("failing test")
+
+
 def test_project_isolation(tmp_path: Path) -> None:
     db = Database(tmp_path / "atlas.db")
     db.initialize()

@@ -10,6 +10,9 @@ class ConfigError(RuntimeError):
     pass
 
 
+VALID_PERMISSION_MODES = {"default", "accept_edits", "explore", "dont_ask"}
+
+
 @dataclass
 class ModuleConfig:
     id: str
@@ -34,8 +37,18 @@ class AtlasConfig:
     model_name: str = ""
     api_base: str = "https://api.openai.com/v1"
     api_key_env: str = "OPENAI_API_KEY"
-    max_turns: int = 12
+    max_turns: int = 10
+    max_tool_calls: int = 40
     max_cost_usd: float = 5.0
+    input_cost_per_1m: float = 0.0
+    output_cost_per_1m: float = 0.0
+
+    def estimate_cost(self, input_tokens: int, output_tokens: int) -> float:
+        """Best-effort cost estimate from optional per-million-token prices."""
+        return (
+            max(0, int(input_tokens)) * self.input_cost_per_1m
+            + max(0, int(output_tokens)) * self.output_cost_per_1m
+        ) / 1_000_000.0
 
     @property
     def data_dir(self) -> Path:
@@ -97,6 +110,12 @@ def load_config(root: str | Path = ".") -> AtlasConfig:
         data = _read_yaml(config_path)
 
     project = data.get("project") or {}
+    configured_root = project.get("root")
+    if configured_root:
+        candidate = Path(str(configured_root))
+        if not candidate.is_absolute():
+            candidate = root_path / candidate
+        root_path = candidate.resolve()
     commands = project.get("commands") or {}
     style = data.get("style") or {}
     learning = data.get("learning") or {}
@@ -107,6 +126,13 @@ def load_config(root: str | Path = ".") -> AtlasConfig:
     for module in project.get("modules") or []:
         if isinstance(module, dict) and module.get("id"):
             modules.append(ModuleConfig(id=str(module["id"]), path=str(module.get("path", ""))))
+
+    permission_mode = str(permissions.get("mode") or "accept_edits")
+    if permission_mode not in VALID_PERMISSION_MODES:
+        raise ConfigError(
+            f"invalid permissions.mode: {permission_mode!r}; "
+            f"expected one of {', '.join(sorted(VALID_PERMISSION_MODES))}"
+        )
 
     return AtlasConfig(
         root=root_path,
@@ -120,13 +146,16 @@ def load_config(root: str | Path = ".") -> AtlasConfig:
         style_profile=str(style.get("profile") or "pep8-ruff"),
         learning_enabled=bool(learning.get("enabled", True)),
         idle_minutes=int(learning.get("idle_minutes", 15)),
-        permission_mode=str(permissions.get("mode") or "accept_edits"),
+        permission_mode=permission_mode,
         model_provider=str(model.get("provider") or "openai-compatible"),
         model_name=str(model.get("name") or ""),
         api_base=str(model.get("api_base") or "https://api.openai.com/v1"),
         api_key_env=str(model.get("api_key_env") or "OPENAI_API_KEY"),
-        max_turns=int(model.get("max_turns", 12)),
+        max_turns=int(model.get("max_turns", 10)),
+        max_tool_calls=int(model.get("max_tool_calls", 40)),
         max_cost_usd=float(model.get("max_cost_usd", 5.0)),
+        input_cost_per_1m=float(model.get("input_cost_per_1m", 0.0)),
+        output_cost_per_1m=float(model.get("output_cost_per_1m", 0.0)),
     )
 
 
@@ -162,8 +191,11 @@ model:
   name: ""
   api_base: https://api.openai.com/v1
   api_key_env: OPENAI_API_KEY
-  max_turns: 12
+  max_turns: 10
+  max_tool_calls: 40
   max_cost_usd: 5.0
+  input_cost_per_1m: 0.0
+  output_cost_per_1m: 0.0
 """
 
 DEFAULT_AGENTS_MD = """\
@@ -204,9 +236,7 @@ def write_default_config(root: str | Path, name: str | None = None) -> tuple[Pat
         None,
     )
     if existing is None:
-        config_path.write_text(
-            DEFAULT_ATLAS_YAML.format(name=project_name), encoding="utf-8"
-        )
+        config_path.write_text(DEFAULT_ATLAS_YAML.format(name=project_name), encoding="utf-8")
     if not agents_path.exists():
         agents_path.write_text(DEFAULT_AGENTS_MD, encoding="utf-8")
     return existing or config_path, agents_path

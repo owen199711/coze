@@ -5,7 +5,6 @@ import json
 import os
 import sqlite3
 import sys
-from pathlib import Path
 
 from . import __version__
 from .config import ConfigError, load_config
@@ -38,11 +37,20 @@ def _ask_user(question: str, options: list[str], recommended: str | None) -> str
 
 def cmd_init(args: argparse.Namespace) -> int:
     atlas = Atlas.init(args.path, name=args.name)
+    root = atlas.config.root
+    config_path = next(
+        (
+            root / name
+            for name in ("atlas.yaml", "atlas.yml", "atlas.json")
+            if (root / name).exists()
+        ),
+        root / "atlas.yaml",
+    )
     _print(
         {
             "ok": True,
-            "root": str(atlas.config.root),
-            "config": str(atlas.config.root / "atlas.yaml"),
+            "root": str(root),
+            "config": str(config_path),
             "db": str(atlas.config.db_path),
             "next": "atlas doctor && atlas demo",
         }
@@ -138,7 +146,9 @@ def cmd_knowledge_add(args: argparse.Namespace) -> int:
 
 def cmd_knowledge_validate(args: argparse.Namespace) -> int:
     atlas = Atlas(args.path)
-    ok = atlas.knowledge.promote(args.id)
+    ok = atlas.knowledge.promote(
+        args.id, {"method": "human", "result": "passed", "note": args.note or ""}
+    )
     _print({"ok": ok, "id": args.id})
     atlas.close()
     return 0 if ok else 1
@@ -168,7 +178,11 @@ def cmd_eval(args: argparse.Namespace) -> int:
             "api_key_env": args.api_key_env or config.api_key_env,
             "max_turns": config.max_turns,
         }
-    result = run_suite(keep=args.keep, config_overrides=overrides)
+    result = run_suite(
+        keep=args.keep,
+        config_overrides=overrides,
+        repeat=getattr(args, "repeat", 1),
+    )
     _print(result)
     return 0 if result.get("failed", 1) == 0 else 1
 
@@ -244,6 +258,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     knowledge_validate = knowledge_sub.add_parser("validate")
     knowledge_validate.add_argument("id")
+    knowledge_validate.add_argument("--note", default=None, help="validation evidence/note")
     knowledge_validate.add_argument("--path", default=".")
     knowledge_validate.set_defaults(func=cmd_knowledge_validate)
 
@@ -274,8 +289,16 @@ def build_parser() -> argparse.ArgumentParser:
     eval_parser.add_argument("--path", default=".", help="project config to read the model from")
     eval_parser.add_argument("--model", default=None, help="model name override")
     eval_parser.add_argument("--api-base", default=None, help="OpenAI-compatible API base override")
-    eval_parser.add_argument("--api-key-env", default=None, help="environment variable holding the API key")
+    eval_parser.add_argument(
+        "--api-key-env", default=None, help="environment variable holding the API key"
+    )
     eval_parser.add_argument("--keep", action="store_true", help="keep temp repos for inspection")
+    eval_parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="run the suite N times to measure variance (default 1)",
+    )
     eval_parser.set_defaults(func=cmd_eval)
 
     return parser
@@ -284,7 +307,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(errors="replace")
+            stream.reconfigure(errors="replace")  # type: ignore[union-attr]
         except Exception:
             pass
     args_list = list(sys.argv[1:] if argv is None else argv)

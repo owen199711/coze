@@ -9,19 +9,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from rich.markdown import Markdown
 from rich.text import Text
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Collapsible, Input, Markdown as MarkdownWidget, OptionList, Static
+from textual.widgets import Collapsible, Input, OptionList, Static
+from textual.widgets import Markdown as MarkdownWidget
 from textual.widgets.option_list import Option
 
 from .config import ConfigError
 from .llm import ModelError
 from .orchestrator import Atlas
 from .skills import install_skill, list_skills, remove_skill
-
+from .workspace import is_sensitive_path
 
 COMMANDS = [
     ("help", "show commands"),
@@ -59,6 +59,7 @@ SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇",
 def is_available() -> bool:
     try:
         import textual  # noqa: F401
+
         return True
     except Exception:
         return False
@@ -66,6 +67,14 @@ def is_available() -> bool:
 
 class MessageLog(VerticalScroll):
     """Scrollable chat transcript with mountable collapsible tool blocks."""
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self.scroll_up(animate=False)
+        event.stop()
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self.scroll_down(animate=False)
+        event.stop()
 
     def write(self, content: Any) -> Static | None:
         if isinstance(content, Text) and not content.plain.strip():
@@ -92,8 +101,8 @@ class MessageLog(VerticalScroll):
         self.mount(widget)
         self.call_after_refresh(self.scroll_end, animate=False)
 
-    def write_user(self, content: str) -> None:
-        stamp = datetime.now().strftime("%H:%M")
+    def write_user(self, content: str, stamp: str | None = None) -> None:
+        stamp = stamp or datetime.now().strftime("%H:%M")
         label = Static(
             Text.assemble(("You", "bold #79c0ff"), (f"   {stamp}", "#4b5059")),
             classes="msg-label",
@@ -105,8 +114,8 @@ class MessageLog(VerticalScroll):
         self.mount(label, body)
         self.call_after_refresh(self.scroll_end, animate=False)
 
-    def write_assistant(self, content: str) -> None:
-        stamp = datetime.now().strftime("%H:%M")
+    def write_assistant(self, content: str, stamp: str | None = None) -> None:
+        stamp = stamp or datetime.now().strftime("%H:%M")
         label = Static(
             Text.assemble(
                 ("✳ Atlas", "bold #d97757"),
@@ -149,6 +158,7 @@ class AtlasTUI(App[None]):
         height: 1fr;
         background: #0d1117;
         padding: 0 2;
+        scrollbar-size-vertical: 1;
     }
     #stream {
         display: none;
@@ -291,7 +301,10 @@ class AtlasTUI(App[None]):
         self._stream.display = False
         self.set_interval(0.12, self._animate_tools)
         self._update_header()
-        self._welcome()
+        if self.atlas.sessions.turns(self.session_id):
+            self._show_session_context(self.session_id)
+        else:
+            self._welcome()
         self._prompt.focus()
 
     def _update_header(self) -> None:
@@ -308,7 +321,9 @@ class AtlasTUI(App[None]):
         )
 
     def _model_name(self) -> str:
-        return self.atlas.config.model_name or "(not configured)"
+        return (
+            self.atlas.config.model_name or os.environ.get("ATLAS_MODEL", "") or "(not configured)"
+        )
 
     def _status_text(self) -> Text:
         short_session = self.session_id[:8]
@@ -326,6 +341,9 @@ class AtlasTUI(App[None]):
         self._busy = busy
         self._prompt.disabled = busy
         if busy:
+            # Give the scroll view focus while the model/tool is running, so
+            # arrow/page keys keep scrolling even though the prompt is locked.
+            self._chat.focus()
             self._status.update(Text(message or "Working...", style="#d29922"))
         else:
             self._status.update(self._status_text())
@@ -342,6 +360,42 @@ class AtlasTUI(App[None]):
         )
         body.append("  Esc Esc to quit\n", style="#6e7681")
         self._chat.write(body)
+        self._status.update(self._status_text())
+
+    def _show_session_context(self, session_id: str) -> None:
+        session = self.atlas.session(session_id)
+        if session is None:
+            self._welcome()
+            return
+        self._chat.clear()
+        self._tool_blocks.clear()
+        self._running_tools.clear()
+        title = str(session.get("title") or "Untitled")
+        self._chat.write(
+            Text(
+                f"Session  {title}  ·  {session_id[:8]}",
+                style="bold #d97757",
+            )
+        )
+        turns = self.atlas.sessions.turns(session_id)
+        shown = turns[-40:]
+        if len(turns) > len(shown):
+            self._chat.write(
+                Text(f"Showing the last {len(shown)} of {len(turns)} turns", style="dim")
+            )
+        for turn in shown:
+            content = str(turn.get("content") or "").strip()
+            if not content:
+                continue
+            created = str(turn.get("created_at") or "")
+            stamp = created[11:16] if len(created) >= 16 else ""
+            if turn.get("role") == "user":
+                self._chat.write_user(content, stamp=stamp)
+            elif turn.get("role") == "assistant":
+                self._chat.write_assistant(content, stamp=stamp)
+        if not turns:
+            self._welcome()
+            return
         self._status.update(self._status_text())
 
     def _help(self) -> None:
@@ -386,6 +440,8 @@ class AtlasTUI(App[None]):
                     relative = path.relative_to(root).as_posix()
                 except ValueError:
                     continue
+                if is_sensitive_path(path, root):
+                    continue
                 found.append(relative)
                 if len(found) >= 2000:
                     break
@@ -416,9 +472,7 @@ class AtlasTUI(App[None]):
 
     def _show_files(self, query: str) -> None:
         query = query.lower().replace("\\", "/")
-        matches = [
-            path for path in self._workspace_files() if query in path.lower()
-        ][:40]
+        matches = [path for path in self._workspace_files() if query in path.lower()][:40]
         options = [Option(path, id=f"file:{path}") for path in matches]
         self._show_palette("file", options)
 
@@ -440,9 +494,7 @@ class AtlasTUI(App[None]):
                 )
             )
         self._show_palette("session", options)
-        self._status.update(
-            Text("Select a session: ↑/↓ then Enter · Esc cancels", style="#d29922")
-        )
+        self._status.update(Text("Select a session: ↑/↓ then Enter · Esc cancels", style="#d29922"))
 
     def _expand_file_refs(self, text: str) -> tuple[str, list[str]]:
         """Expand `#path` tokens into a bounded, read-only file attachment block."""
@@ -456,6 +508,8 @@ class AtlasTUI(App[None]):
             try:
                 candidate.relative_to(root)
             except ValueError:
+                continue
+            if is_sensitive_path(candidate, root):
                 continue
             if not candidate.is_file():
                 continue
@@ -501,8 +555,9 @@ class AtlasTUI(App[None]):
                 self._update_header()
                 self._tool_blocks.clear()
                 self._running_tools.clear()
-                self._chat.clear()
-                self._welcome()
+                self._stream_buffer = ""
+                self._stream.display = False
+                self._show_session_context(session_id)
             self._prompt.focus()
             return
         self._hide_palette()
@@ -510,9 +565,9 @@ class AtlasTUI(App[None]):
     def on_input_changed(self, event: Input.Changed) -> None:
         text = event.value
         if self._palette_mode == "session":
-            if not text:
-                return
-            self._hide_palette()
+            # The session picker is a modal list: typing must not replace it
+            # with the command/file palette. Esc or Enter closes it.
+            return
         if text.startswith("/") and " " not in text:
             self._show_commands(text[1:])
             return
@@ -525,6 +580,19 @@ class AtlasTUI(App[None]):
         self._hide_palette()
 
     def on_key(self, event: events.Key) -> None:
+        scroll_actions = {
+            "up": "action_scroll_up",
+            "down": "action_scroll_down",
+            "pageup": "action_page_up",
+            "pagedown": "action_page_down",
+            "home": "action_scroll_home",
+            "end": "action_scroll_end",
+        }
+        if self._busy and not self._palette.display and event.key in scroll_actions:
+            getattr(self._chat, scroll_actions[event.key])()
+            event.stop()
+            event.prevent_default()
+            return
         if event.key in {"up", "down"} and self._palette.display:
             if event.key == "up":
                 self._palette.action_cursor_up()
@@ -573,6 +641,8 @@ class AtlasTUI(App[None]):
         self._update_header()
         self._tool_blocks.clear()
         self._running_tools.clear()
+        self._stream_buffer = ""
+        self._stream.display = False
         self._chat.clear()
         self._welcome()
 
@@ -592,12 +662,20 @@ class AtlasTUI(App[None]):
             self._new_session()
             return
         if command == "/clear":
+            if self._busy:
+                self._chat.write(Text("Wait for the current turn to finish.", style="yellow"))
+                return
             self._tool_blocks.clear()
             self._running_tools.clear()
+            self._stream_buffer = ""
+            self._stream.display = False
             self._chat.clear()
             self._welcome()
             return
         if command in {"/session", "/sessions"}:
+            if self._busy:
+                self._chat.write(Text("Wait for the current turn to finish.", style="yellow"))
+                return
             self._show_sessions()
             return
         if command == "/compact":
@@ -657,9 +735,7 @@ class AtlasTUI(App[None]):
             if action == "install":
                 source = value.strip()
                 if not source:
-                    self._chat.write(
-                        Text("usage: /skill install <path-or-url>", style="yellow")
-                    )
+                    self._chat.write(Text("usage: /skill install <path-or-url>", style="yellow"))
                     return
                 if self._busy:
                     self._chat.write(Text("Wait for the current turn to finish.", style="yellow"))
@@ -702,14 +778,18 @@ class AtlasTUI(App[None]):
                     )
                 )
             return
-        self._chat.write(
-            Text(f"unknown command: {command} (try /help)", style="yellow")
-        )
+        self._chat.write(Text(f"unknown command: {command} (try /help)", style="yellow"))
 
     def _append_stream(self, text: str) -> None:
         self._stream_buffer += text
         self._stream.display = True
-        lines = self._stream_buffer.count("\n") + 1
+        newline_rows = self._stream_buffer.count("\n") + 1
+        width = max(20, self._stream.size.width - 4)
+        wrapped_rows = sum(
+            max(1, (len(line) + width - 1) // width)
+            for line in self._stream_buffer.splitlines() or [""]
+        )
+        lines = max(newline_rows, wrapped_rows)
         # Grow with the stream, but keep a small floor and a hard cap so a
         # single long answer cannot consume the whole chat area.
         self._stream.styles.height = min(16, max(3, lines))
@@ -750,6 +830,9 @@ class AtlasTUI(App[None]):
             frame = SPINNER_FRAMES[self._spinner_index]
             block, body = self._chat.write_tool(f"{frame} {name}  {arguments}")
             body.update(Text("running...", style="#d29922"))
+            self._status.update(
+                Text("Tool running · ↑/↓ scroll · click card to expand", style="#d29922")
+            )
             self._tool_blocks[call_id] = (block, body)
             self._running_tools[call_id] = (block, name, arguments)
             # An interrupted turn can leave a tool.call with no matching
@@ -792,16 +875,12 @@ class AtlasTUI(App[None]):
 
     async def _install_skill(self, source: str) -> None:
         try:
-            skill = await asyncio.to_thread(
-                install_skill, self.atlas.config.data_dir, source
-            )
+            skill = await asyncio.to_thread(install_skill, self.atlas.config.data_dir, source)
         except (OSError, ValueError) as exc:
             self._chat.write(Text(f"skill install error: {exc}", style="bold #f85149"))
         else:
             self._chat.write(Text(f"installed skill: {skill.name}", style="#7ee787"))
-            self._chat.write(
-                Text("It will be included in the next system prompt.", style="dim")
-            )
+            self._chat.write(Text("It will be included in the next system prompt.", style="dim"))
         finally:
             self._set_busy(False)
 
@@ -864,7 +943,7 @@ class AtlasTUI(App[None]):
         finally:
             self._set_busy(False)
 
-    def action_quit(self) -> None:
+    def action_quit(self) -> None:  # type: ignore[override]
         if self._busy:
             self._chat.write(Text("Wait for the current turn to finish.", style="yellow"))
             return

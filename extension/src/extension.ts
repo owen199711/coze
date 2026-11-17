@@ -11,28 +11,43 @@ class AtlasClient {
     return vscode.workspace.getConfiguration("atlas").get<string>("endpoint", "http://127.0.0.1:8765");
   }
 
-  private token(): string {
+  private async token(): Promise<string> {
+    const stored = await this.context.secrets.get("atlas.token");
+    if (stored) {
+      return stored;
+    }
     return vscode.workspace.getConfiguration("atlas").get<string>("token", "");
+  }
+
+  private timeoutMs(): number {
+    return vscode.workspace
+      .getConfiguration("atlas")
+      .get<number>("requestTimeoutMs", 300000);
   }
 
   async rpc<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
-    const token = this.token();
+    const token = await this.token();
     if (token) {
       headers["Authorization"] = `Bearer ${token}`;
     }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs());
     let response: Response;
     try {
       response = await fetch(`${this.endpoint()}/rpc`, {
         method: "POST",
         headers,
         body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
+        signal: controller.signal,
       });
     } catch (error) {
       throw new Error(
         `Atlas daemon is not reachable at ${this.endpoint()}. ` +
           `Run "Atlas: Start Local Server" or \`atlas serve\`. (${String(error)})`
       );
+    } finally {
+      clearTimeout(timer);
     }
     const data = (await response.json()) as { result?: T; error?: string };
     if (data.error) {
@@ -44,7 +59,17 @@ class AtlasClient {
   async ensureSession(): Promise<string> {
     const existing = this.context.workspaceState.get<string>("atlas.sessionId");
     if (existing) {
-      return existing;
+      try {
+        const session = await this.rpc<{ id: string } | null>("session.get", {
+          session_id: existing,
+        });
+        if (session?.id === existing) {
+          return existing;
+        }
+      } catch {
+        // The daemon may have been restarted with a fresh database.
+      }
+      await this.context.workspaceState.update("atlas.sessionId", undefined);
     }
     const session = await this.rpc<{ id: string }>("session.create", {
       title: "VSCode session",
@@ -70,6 +95,26 @@ export function activate(context: vscode.ExtensionContext): void {
   status.command = "atlas.chat";
   status.show();
   context.subscriptions.push(status);
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("atlas.setToken", async () => {
+      const token = await vscode.window.showInputBox({
+        prompt: "Atlas daemon bearer token (leave empty to clear)",
+        password: true,
+        ignoreFocusOut: true,
+      });
+      if (token === undefined) {
+        return;
+      }
+      if (token.trim()) {
+        await context.secrets.store("atlas.token", token.trim());
+        vscode.window.showInformationMessage("Atlas token stored in SecretStorage.");
+      } else {
+        await context.secrets.delete("atlas.token");
+        vscode.window.showInformationMessage("Atlas token cleared.");
+      }
+    })
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("atlas.chat", async () => {
