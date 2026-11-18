@@ -82,14 +82,19 @@ class ToolResult:
         # tool call until it exhausted max_turns. Keep a bounded preview instead.
         preview: dict[str, Any] = {}
         remaining = max(600, max_chars - 900)
+        preview_truncated = False
         for key in ("content", "text", "stdout", "stderr"):
             value = self.data.get(key)
             if not isinstance(value, str) or not value or remaining <= 0:
                 continue
-            limit = min(remaining, 2600)
+            limit = max(1, remaining)
             snippet = value[:limit]
             if len(value) > limit:
                 snippet += "\n...[truncated]"
+                preview_truncated = True
+                if key == "content":
+                    preview["content_truncated"] = True
+                    preview["content_total_chars"] = len(value)
             preview[key] = snippet
             remaining -= len(snippet)
         matches = self.data.get("matches")
@@ -103,9 +108,32 @@ class ToolResult:
             "summary": self.summary,
             "data_preview": preview,
             "artifact": self.artifact,
+            "preview_truncated": preview_truncated,
             "note": f"truncated preview: full result is {len(text)} chars",
         }
         result = json.dumps(compact, ensure_ascii=False, indent=2)
+        # JSON escaping (especially newlines in source code) can double the
+        # preview size, so shrink the largest preview field until it fits.
+        for _ in range(8):
+            if len(result) <= max_chars:
+                return result
+            string_keys = [
+                key
+                for key in ("content", "text", "stdout", "stderr")
+                if isinstance(preview.get(key), str)
+            ]
+            if not string_keys:
+                break
+            key = max(string_keys, key=lambda item: len(preview[item]))
+            value = preview[key]
+            if len(value) <= 600:
+                break
+            ratio = max(0.05, (max_chars / len(result)) * 0.75)
+            preview[key] = value[: max(600, int(len(value) * ratio))] + "\n...[truncated]"
+            if key == "content":
+                preview["content_truncated"] = True
+            compact["note"] = f"truncated preview: full result is {len(text)} chars"
+            result = json.dumps(compact, ensure_ascii=False, indent=2)
         if len(result) <= max_chars:
             return result
         # Last resort: keep only the envelope, never partial invalid JSON.

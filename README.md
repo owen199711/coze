@@ -239,7 +239,9 @@ Tools currently available:
 
 `read`, `edit`, `search`, `shell`, `git`, `check`, `knowledge`, `plan`, `ask_user`,
 `web` (fetch only). `lsp` and `subagent` return a clear "not available in this milestone"
-message; they are placeholders for M1/M2.
+message; they are placeholders for M1/M2. `read` is bounded to 400 lines or 12,000
+characters per call and returns `next_start` when there is more; the model-facing
+result budget is `tools.result_max_chars` (default 16,000).
 
 ---
 

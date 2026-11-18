@@ -372,7 +372,7 @@ class AgentRuntime:
                         "role": "tool",
                         "tool_call_id": call.get("id") or name,
                         "name": name,
-                        "content": result.as_text(),
+                        "content": result.as_text(self.config.tool_result_max_chars),
                     }
                 )
                 if seen == 2 and key not in reminded:

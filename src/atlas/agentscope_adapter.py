@@ -70,8 +70,9 @@ def build_agent(
     from agentscope.tool import ToolBase, ToolChunk, Toolkit
 
     class _AtlasTool(ToolBase):
-        def __init__(self, spec: Any):
+        def __init__(self, spec: Any, config: AtlasConfig):
             self._spec = spec
+            self._config = config
             self.name = spec.name
             self.description = spec.description
             self.input_schema = spec.schema
@@ -86,9 +87,13 @@ def build_agent(
 
         async def call(self, **kwargs: Any) -> Any:
             result = tools.call(self._spec.name, kwargs)
-            return ToolChunk(content=[TextBlock(text=result.as_text())])
+            return ToolChunk(
+                content=[TextBlock(text=result.as_text(self._config.tool_result_max_chars))]
+            )
 
-    toolkit = Toolkit(tools=[_AtlasTool(spec) for spec in tools._specs.values()])
+    toolkit = Toolkit(
+        tools=[_AtlasTool(spec, config) for spec in tools._specs.values()]
+    )
     context = _restore_context(sessions, session_id) if sessions is not None else []
     state = AgentState(session_id=session_id, context=context)
     return Agent(

@@ -35,3 +35,6 @@ model:
   max_cost_usd: 5.0
   input_cost_per_1m: 0.0
   output_cost_per_1m: 0.0
+
+tools:
+  result_max_chars: 16000

@@ -29,6 +29,7 @@ SKIP_DIRS = {
     "build",
 }
 MAX_READ_LINES = 400
+MAX_READ_CHARS = 12_000
 MAX_READ_BYTES = 2_000_000
 MAX_OUTPUT = 12000
 
@@ -172,7 +173,13 @@ class Workspace:
         with target.open("w", encoding="utf-8", newline="") as handle:
             handle.write(normalized.replace("\n", newline))
 
-    def read(self, path: str, start: int | None = None, end: int | None = None) -> ToolResult:
+    def read(
+        self,
+        path: str,
+        start: int | None = None,
+        end: int | None = None,
+        max_chars: int | None = None,
+    ) -> ToolResult:
         target = self.resolve(path)
         if is_sensitive_path(target, self.root, allow_skills=True):
             return ToolResult("error", f"sensitive path denied: {path}", {"path": path})
@@ -202,19 +209,49 @@ class Workspace:
             )
         end_idx = min(total, end or total)
         selected = lines[start_idx:end_idx]
-        truncated = len(selected) > MAX_READ_LINES
-        if truncated:
+        truncated_by_lines = len(selected) > MAX_READ_LINES
+        if truncated_by_lines:
             selected = selected[:MAX_READ_LINES]
+
+        char_limit = max(1, max_chars or MAX_READ_CHARS)
+        kept: list[str] = []
+        used_chars = 0
+        truncated_by_chars = False
+        partial_line = False
+        for line in selected:
+            addition = len(line) + (1 if kept else 0)
+            if kept and used_chars + addition > char_limit:
+                truncated_by_chars = True
+                break
+            if not kept and len(line) > char_limit:
+                kept.append(line[:char_limit])
+                used_chars = char_limit
+                truncated_by_chars = True
+                partial_line = True
+                break
+            kept.append(line)
+            used_chars += addition
+        selected = kept
+        truncated = truncated_by_lines or truncated_by_chars
         content = "\n".join(selected)
+        next_start = start_idx + len(selected) + 1 if truncated else None
+        note = f"read {path} lines {start_idx + 1}-{start_idx + len(selected)} of {total}"
+        if next_start is not None:
+            note += f"; continue at line {next_start}"
         return ToolResult(
             "ok",
-            f"read {path} lines {start_idx + 1}-{start_idx + len(selected)} of {total}",
+            note,
             {
                 "path": path,
                 "start": start_idx + 1,
                 "end": start_idx + len(selected),
                 "total_lines": total,
                 "truncated": truncated,
+                "truncated_by_lines": truncated_by_lines,
+                "truncated_by_chars": truncated_by_chars,
+                "partial_line": partial_line,
+                "content_chars": len(content),
+                "next_start": next_start,
                 "content": content,
             },
         )

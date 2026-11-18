@@ -109,6 +109,7 @@ class AtlasTools:
                         "path": {"type": "string"},
                         "start": {"type": "integer", "minimum": 1},
                         "end": {"type": "integer", "minimum": 1},
+                        "max_chars": {"type": "integer", "minimum": 600},
                     },
                     "required": ["path"],
                 },
@@ -300,8 +301,14 @@ class AtlasTools:
             return ToolResult("error", f"{type(exc).__name__}: {exc}")
 
     # -------------------------------------------------------------- handlers
-    def _read(self, path: str, start: int | None = None, end: int | None = None) -> ToolResult:
-        result = self.workspace.read(path, start=start, end=end)
+    def _read(
+        self,
+        path: str,
+        start: int | None = None,
+        end: int | None = None,
+        max_chars: int | None = None,
+    ) -> ToolResult:
+        result = self.workspace.read(path, start=start, end=end, max_chars=max_chars)
         if result.status == "ok":
             self._read_paths.add(self._path_key(path))
         return result

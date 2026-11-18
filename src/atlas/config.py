@@ -45,6 +45,7 @@ class AtlasConfig:
     max_cost_usd: float = 5.0
     input_cost_per_1m: float = 0.0
     output_cost_per_1m: float = 0.0
+    tool_result_max_chars: int = 16_000
 
     def estimate_cost(self, input_tokens: int, output_tokens: int) -> float:
         """Best-effort cost estimate from optional per-million-token prices."""
@@ -125,6 +126,7 @@ def load_config(root: str | Path = ".") -> AtlasConfig:
     learning_budget = learning.get("budget") or {}
     permissions = data.get("permissions") or {}
     model = data.get("model") or {}
+    tools = data.get("tools") or {}
 
     modules: list[ModuleConfig] = []
     for module in project.get("modules") or []:
@@ -143,6 +145,9 @@ def load_config(root: str | Path = ".") -> AtlasConfig:
             f"invalid learning.capture: {capture_mode!r}; "
             f"expected one of {', '.join(sorted(VALID_CAPTURE_MODES))}"
         )
+    tool_result_max_chars = int(tools.get("result_max_chars", 16_000))
+    if tool_result_max_chars < 600:
+        raise ConfigError("tools.result_max_chars must be >= 600")
 
     return AtlasConfig(
         root=root_path,
@@ -168,6 +173,7 @@ def load_config(root: str | Path = ".") -> AtlasConfig:
         max_cost_usd=float(model.get("max_cost_usd", 5.0)),
         input_cost_per_1m=float(model.get("input_cost_per_1m", 0.0)),
         output_cost_per_1m=float(model.get("output_cost_per_1m", 0.0)),
+        tool_result_max_chars=tool_result_max_chars,
     )
 
 
@@ -209,6 +215,9 @@ model:
   max_cost_usd: 5.0
   input_cost_per_1m: 0.0
   output_cost_per_1m: 0.0
+
+tools:
+  result_max_chars: 16000
 """
 
 DEFAULT_AGENTS_MD = """\

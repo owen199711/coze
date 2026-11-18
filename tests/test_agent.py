@@ -190,6 +190,17 @@ class BadFinalModel:
         )
 
 
+def test_large_tool_result_uses_larger_budget() -> None:
+    result = ToolResult(
+        "ok",
+        "read big",
+        {"path": "big.py", "content": "line\n" * 5000},
+    )
+    text = result.as_text(16_000)
+    assert 4000 < len(text) <= 16_000
+    assert '"content_truncated": true' in text
+
+
 def test_large_tool_result_keeps_content_preview() -> None:
     result = ToolResult(
         "ok",

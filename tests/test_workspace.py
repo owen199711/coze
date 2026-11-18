@@ -24,6 +24,26 @@ def test_create_read_edit(workspace: Workspace) -> None:
     assert "x = 2" in workspace.read("hello.py").data["content"]
 
 
+def test_read_truncates_by_chars_and_reports_next_start(workspace: Workspace) -> None:
+    body = "\n".join(f"line {index:03d} " + "x" * 80 for index in range(1, 201))
+    workspace.edit("big.txt", mode="create", content=body)
+    result = workspace.read("big.txt", max_chars=2000)
+    assert result.status == "ok"
+    assert result.data["truncated"] is True
+    assert len(result.data["content"]) <= 2000
+    assert result.data["content_chars"] == len(result.data["content"])
+    assert result.data["next_start"] > 1
+    assert result.data["end"] == result.data["next_start"] - 1
+
+
+def test_read_reports_no_next_start_for_complete_file(workspace: Workspace) -> None:
+    workspace.edit("small.txt", mode="create", content="one\ntwo\n")
+    result = workspace.read("small.txt", max_chars=2000)
+    assert result.status == "ok"
+    assert result.data["truncated"] is False
+    assert result.data["next_start"] is None
+
+
 def test_path_escape_denied(workspace: Workspace) -> None:
     with pytest.raises(ValueError):
         workspace.read("../outside.txt")
