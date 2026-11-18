@@ -17,6 +17,7 @@ style:
 
 learning:
   enabled: true
+  capture: candidate
   idle_minutes: 15
   budget:
     max_cost_usd_per_night: 2.0
@@ -29,8 +30,8 @@ model:
   name: deepseek-chat
   api_base: https://api.deepseek.com
   api_key_env: DEEPSEEK_API_KEY
-  max_turns: 24
-  max_tool_calls: 40
+  max_turns: 50
+  max_tool_calls: 50
   max_cost_usd: 5.0
   input_cost_per_1m: 0.0
   output_cost_per_1m: 0.0

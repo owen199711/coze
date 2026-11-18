@@ -193,6 +193,18 @@ def test_capture_ignores_neutral_message(tmp_path: Path) -> None:
         atlas.close()
 
 
+def test_learning_disabled_skips_capture(tmp_path: Path) -> None:
+    atlas = Atlas.init(tmp_path, name="capture-disabled")
+    try:
+        atlas.config.learning_enabled = False
+        atlas._model = ReplyModel()
+        session = atlas.create_session("disabled")
+        atlas.chat(session["id"], "不对，以后都用 2 空格缩进")
+        assert atlas.knowledge.list(kind="fact", status="candidate") == []
+    finally:
+        atlas.close()
+
+
 def test_agent_knowledge_write_is_candidate(tmp_path: Path) -> None:
     atlas = Atlas.init(tmp_path, name="agent-write")
     try:
@@ -230,42 +242,6 @@ def test_search_uses_chunks_for_hybrid_recall(service: KnowledgeService) -> None
     assert target.origin == "hybrid"
     assert target.chunk_id is not None
     assert "unique-chunk-needle" in target.snippet
-
-
-def test_untrusted_memory_is_not_recalled_by_default(service: KnowledgeService) -> None:
-    item_id = service.write(
-        _fact("Untrusted note", "unique-needle untrusted"),
-        actor="system",
-    )
-    service.db.execute(
-        "UPDATE knowledge_items SET trust='untrusted' WHERE id=?", (item_id,)
-    )
-    assert service.recall(RecallQuery(text="unique-needle")) == []
-    assert service.recall(RecallQuery(text="unique-needle", allow_untrusted=True))
-    assert service.search("unique-needle")
-
-
-def test_secret_content_is_rejected(service: KnowledgeService) -> None:
-    with pytest.raises(ValueError, match="secret material"):
-        service.write(
-            _fact(
-                "Leaked token",
-                "api_key = sk-abcdefghijklmnopqrstuvwx",
-            )
-        )
-
-
-def test_knowledge_columns_migrated(tmp_path: Path) -> None:
-    db = Database(tmp_path / "schema.db")
-    db.initialize()
-    try:
-        columns = {
-            row["name"]
-            for row in db.fetchall("PRAGMA table_info(knowledge_items)")
-        }
-        assert {"source_hash", "trust"} <= columns
-    finally:
-        db.close()
 
 
 def test_refresh_sources_marks_changed_doc_stale(

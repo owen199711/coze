@@ -95,6 +95,21 @@ def test_system_prompt_does_not_claim_empty_knowledge(tmp_path: Path) -> None:
         atlas.close()
 
 
+def test_system_prompt_states_memory_policy(tmp_path: Path) -> None:
+    """The prompt must match the real candidate/validation lifecycle."""
+    atlas = Atlas.init(tmp_path, name="memory-policy")
+    try:
+        prompt = build_system_prompt(atlas.config, atlas.knowledge)
+        assert "candidate" in prompt
+        assert "not recalled until" in prompt
+        assert "source=" in prompt
+        assert "decisions" in prompt
+        assert "no in-place update" in prompt
+        assert "duplicate" in prompt.lower()
+    finally:
+        atlas.close()
+
+
 def test_system_prompt_renders_written_knowledge(tmp_path: Path) -> None:
     atlas = Atlas.init(tmp_path, name="written-knowledge")
     try:
