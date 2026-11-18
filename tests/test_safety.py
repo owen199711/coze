@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -9,7 +11,7 @@ import pytest
 from atlas.config import AtlasConfig
 from atlas.orchestrator import Atlas
 from atlas.skills import install_skill
-from atlas.tools import AtlasTools
+from atlas.tools import AtlasTools, _PublicRedirectHandler
 from atlas.workspace import Workspace, is_public_http_url
 
 
@@ -129,6 +131,20 @@ def test_shell_does_not_expose_secret_env(tmp_path: Path, monkeypatch) -> None:
     assert "missing" in result.data["stdout"]
 
 
+def test_web_redirect_handler_rejects_private_target() -> None:
+    handler = _PublicRedirectHandler()
+    request = urllib.request.Request("https://example.com/")
+    with pytest.raises(urllib.error.URLError, match="redirect target"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "http://127.0.0.1:9/",
+        )
+
+
 def test_web_and_skills_reject_private_urls(tmp_path: Path) -> None:
     assert is_public_http_url("http://127.0.0.1:9/") is False
     assert is_public_http_url("http://169.254.169.254/latest/meta-data/") is False
@@ -146,6 +162,37 @@ def test_web_and_skills_reject_private_urls(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="loopback/private"):
         install_skill(tmp_path / ".atlas", "http://127.0.0.1:9/SKILL.md")
+
+
+def test_tool_schema_rejects_invalid_values(tmp_path: Path) -> None:
+    atlas, tools = _tools_with_mode(tmp_path, "accept_edits")
+    try:
+        assert "invalid arguments" in tools.call(
+            "search", {"mode": "bogus", "query": "x"}
+        ).summary
+        assert "invalid arguments" in tools.call(
+            "read", {"path": "a.py", "max_chars": 1}
+        ).summary
+        assert "invalid arguments" in tools.call(
+            "knowledge", {"action": "search", "query": "x", "limit": -1}
+        ).summary
+    finally:
+        atlas.close()
+
+
+def test_git_refuses_staged_secret_patterns(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "checkout", "-q", "-b", "feature"], cwd=tmp_path, check=True)
+    (tmp_path / "leak.py").write_text(
+        'TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz123456"\n', encoding="utf-8"
+    )
+    assert workspace.git("add leak.py").status == "ok"
+    blocked = workspace.git("commit -m leak")
+    assert blocked.status == "error"
+    assert "secret" in blocked.summary
 
 
 def test_git_refuses_sensitive_files_and_main_commit(tmp_path: Path) -> None:
@@ -191,6 +238,33 @@ def test_default_mode_requires_approval(tmp_path: Path) -> None:
         assert result.status == "error"
         assert asked, "default mode must ask before a write"
         assert (tmp_path / "a.py").read_text(encoding="utf-8") == "a = 1\n"
+    finally:
+        atlas.close()
+
+
+def test_default_mode_allows_read_only_tool_actions(tmp_path: Path) -> None:
+    atlas, tools = _tools_with_mode(tmp_path, "default")
+    try:
+        search = tools.call("knowledge", {"action": "search", "query": "x"})
+        assert "requires approval" not in search.summary
+
+        plan = tools.call("plan", {"action": "read"})
+        assert "requires approval" not in plan.summary
+
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        status = tools.call("git", {"args": "status"})
+        assert "requires approval" not in status.summary
+
+        write = tools.call(
+            "knowledge",
+            {
+                "action": "write",
+                "title": "x",
+                "body": "y",
+                "kind": "fact",
+            },
+        )
+        assert "requires approval" in write.summary
     finally:
         atlas.close()
 

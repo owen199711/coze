@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from typing import Any, Callable
@@ -29,6 +31,18 @@ class ToolSpec:
                 "parameters": self.schema,
             },
         }
+
+
+class _PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-run the SSRF check for every redirect, not just the first URL."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urllib.parse.urljoin(req.full_url, newurl)
+        if not is_public_http_url(target):
+            raise urllib.error.URLError(
+                f"redirect target is not a public http(s) URL: {target}"
+            )
+        return super().redirect_request(req, fp, code, msg, headers, target)
 
 
 class AtlasTools:
@@ -72,6 +86,63 @@ class AtlasTools:
             )
         return None
 
+    def _is_read_only_action(self, name: str, args: dict[str, Any]) -> bool:
+        if name == "knowledge" and args.get("action") in {"search", "get"}:
+            return True
+        if name == "plan" and args.get("action") == "read":
+            return True
+        if name == "git":
+            first = (str(args.get("args") or "").strip().split() or [""])[0]
+            return first in {"status", "diff", "log", "show", "rev-parse"}
+        return False
+
+    @staticmethod
+    def _validate_value(value: Any, schema: dict[str, Any], path: str) -> str | None:
+        if value is None:
+            return None
+        expected = schema.get("type")
+        if expected == "string" and not isinstance(value, str):
+            return f"{path} must be a string"
+        if expected == "integer":
+            if isinstance(value, bool) or not isinstance(value, int):
+                return f"{path} must be an integer"
+        if expected == "number":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return f"{path} must be a number"
+        if expected == "boolean" and not isinstance(value, bool):
+            return f"{path} must be a boolean"
+        if expected == "array":
+            if not isinstance(value, list):
+                return f"{path} must be an array"
+            item_schema = schema.get("items") or {}
+            for index, item in enumerate(value):
+                error = AtlasTools._validate_value(item, item_schema, f"{path}[{index}]")
+                if error:
+                    return error
+        if expected == "object" and not isinstance(value, dict):
+            return f"{path} must be an object"
+        enum = schema.get("enum")
+        if enum is not None and value not in enum:
+            return f"{path} must be one of {enum}"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            minimum = schema.get("minimum")
+            maximum = schema.get("maximum")
+            if minimum is not None and value < minimum:
+                return f"{path} must be >= {minimum}"
+            if maximum is not None and value > maximum:
+                return f"{path} must be <= {maximum}"
+        return None
+
+    def _validate_arguments(self, spec: ToolSpec, args: dict[str, Any]) -> str | None:
+        properties = spec.schema.get("properties") or {}
+        for key, value in args.items():
+            schema = properties.get(key)
+            if isinstance(schema, dict):
+                error = self._validate_value(value, schema, key)
+                if error:
+                    return error
+        return None
+
     def _approval_denied(self, spec: ToolSpec, args: dict[str, Any]) -> ToolResult | None:
         """Gate non-read-only tools in `default` mode (ADR-0003).
 
@@ -80,6 +151,8 @@ class AtlasTools:
         from the user; without an interactive callback we fail closed.
         """
         if self.permission_mode != "default" or spec.read_only:
+            return None
+        if self._is_read_only_action(spec.name, args):
             return None
         if not self.ask_user_cb:
             return ToolResult(
@@ -203,7 +276,7 @@ class AtlasTools:
                         "source": {"type": "string"},
                         "outcome": {"type": "string"},
                         "validation": {"type": "string"},
-                        "limit": {"type": "integer"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                     },
                     "required": ["action"],
                 },
@@ -290,6 +363,9 @@ class AtlasTools:
         missing = [key for key in required if key not in args]
         if missing:
             return ToolResult("error", f"missing required arguments: {', '.join(missing)}")
+        invalid = self._validate_arguments(spec, args)
+        if invalid:
+            return ToolResult("error", f"invalid arguments: {invalid}")
         denied = self._approval_denied(spec, args)
         if denied is not None:
             return denied
@@ -527,7 +603,8 @@ class AtlasTools:
             request = urllib.request.Request(
                 url, headers={"User-Agent": "atlas-agent/0.1 (+local)"}
             )
-            with urllib.request.urlopen(request, timeout=20) as response:
+            opener = urllib.request.build_opener(_PublicRedirectHandler())
+            with opener.open(request, timeout=20) as response:
                 raw = response.read(200_000).decode("utf-8", errors="replace")
         except Exception as exc:
             return ToolResult("error", f"fetch failed: {exc}")

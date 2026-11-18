@@ -93,4 +93,4 @@ M0 的知识库只有一个 `KnowledgeService`，但召回使用的是
 - `test_curator_budget_stops_llm_and_falls_back`
 - `test_search_uses_chunks_for_hybrid_recall`
 
-全量：`pytest -q` → 133 passed；`ruff check src tests` 通过；`mypy src` 通过。
+全量：`pytest -q` → 140 passed；`ruff check src tests` 通过；`mypy src` 通过。

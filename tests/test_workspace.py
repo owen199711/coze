@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -60,6 +61,32 @@ def test_shell_denies_dangerous(workspace: Workspace) -> None:
     result = workspace.shell("rm -rf /")
     assert result.status == "error"
     assert "denied" in result.summary
+
+
+def test_search_rejects_unsafe_regex_patterns(workspace: Workspace) -> None:
+    nested = workspace.search(mode="content", query="(a+)+")
+    assert nested.status == "error"
+    assert "nested quantifier" in nested.summary
+    too_long = workspace.search(mode="content", query="a" * 201)
+    assert too_long.status == "error"
+    assert "too long" in too_long.summary
+
+
+def test_shell_timeout_terminates_process(workspace: Workspace) -> None:
+    result = workspace.shell(
+        f'"{sys.executable}" -c "import time; time.sleep(10)"',
+        timeout=1,
+    )
+    assert result.status == "error"
+    assert "timed out" in result.summary
+
+
+def test_files_search_applies_glob_filter(workspace: Workspace) -> None:
+    workspace.edit("src/app.py", mode="create", content="x = 1\n")
+    workspace.edit("docs/app.py", mode="create", content="y = 1\n")
+    result = workspace.search(mode="files", query="*.py", glob="src/**")
+    assert result.status == "ok"
+    assert result.data["matches"] == ["src/app.py"]
 
 
 def test_workspace_under_build_directory_is_not_skipped(tmp_path: Path) -> None:

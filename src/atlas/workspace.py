@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import time
@@ -31,6 +32,8 @@ SKIP_DIRS = {
 MAX_READ_LINES = 400
 MAX_READ_CHARS = 12_000
 MAX_READ_BYTES = 2_000_000
+MAX_SEARCH_PATTERN = 200
+MAX_SEARCH_SECONDS = 5
 MAX_OUTPUT = 12000
 
 # Files/directories that must not be exposed to the model even though they live
@@ -342,6 +345,12 @@ class Workspace:
                 if is_sensitive_path(path, self.root):
                     continue
                 relative = self.relative(path)
+                if (
+                    glob
+                    and not fnmatch.fnmatch(path.name, glob)
+                    and not fnmatch.fnmatch(relative, glob)
+                ):
+                    continue
                 if fnmatch.fnmatch(path.name, pattern) or fnmatch.fnmatch(relative, pattern):
                     matches.append(relative)
                     if len(matches) >= max_results:
@@ -350,12 +359,27 @@ class Workspace:
 
         if not query:
             return ToolResult("error", "query is required for content search")
+        if len(query) > MAX_SEARCH_PATTERN:
+            return ToolResult(
+                "error",
+                f"search pattern is too long (max {MAX_SEARCH_PATTERN} chars)",
+            )
+        if re.search(r"\([^()]*[+*][^()]*\)[+*{]", query):
+            return ToolResult(
+                "error",
+                "nested quantifier search patterns are not allowed",
+            )
         try:
             regex = re.compile(query, re.IGNORECASE)
         except re.error as exc:
             return ToolResult("error", f"invalid regex: {exc}")
         matches = []
+        deadline = time.monotonic() + MAX_SEARCH_SECONDS
+        timed_out = False
         for path in self.root.rglob("*"):
+            if time.monotonic() > deadline:
+                timed_out = True
+                break
             if path.is_dir() or self._should_skip(path):
                 continue
             if is_sensitive_path(path, self.root):
@@ -374,13 +398,27 @@ class Workspace:
             except (UnicodeDecodeError, OSError):
                 continue
             for line_no, line in enumerate(text.splitlines(), 1):
+                if time.monotonic() > deadline:
+                    timed_out = True
+                    break
                 if regex.search(line):
                     matches.append({"path": relative, "line": line_no, "text": line.strip()[:300]})
                     if len(matches) >= max_results:
                         break
-            if len(matches) >= max_results:
+            if timed_out or len(matches) >= max_results:
                 break
-        return ToolResult("ok", f"found {len(matches)} matches", {"matches": matches})
+        data: dict[str, Any] = {"matches": matches}
+        if timed_out:
+            data["timed_out"] = True
+        return ToolResult(
+            "ok" if not timed_out else "error",
+            (
+                f"found {len(matches)} matches"
+                if not timed_out
+                else f"search timed out after {MAX_SEARCH_SECONDS}s; partial results"
+            ),
+            data,
+        )
 
     # ---------------------------------------------------------------- shell
     def shell(self, command: str, cwd: str | None = None, timeout: int = 120) -> ToolResult:
@@ -407,33 +445,60 @@ class Workspace:
             )
         }
         env["PYTHONDONTWRITEBYTECODE"] = "1"
+        popen_kwargs: dict[str, Any] = {
+            "shell": True,
+            "cwd": str(workdir),
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "env": env,
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
         try:
-            completed = subprocess.run(
-                command,
-                shell=True,
-                cwd=str(workdir),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                env=env,
-                timeout=timeout,
-                check=False,
-            )
+            process = subprocess.Popen(command, **popen_kwargs)
+        except OSError as exc:
+            return ToolResult("error", f"command failed to start: {exc}: {command}")
+        try:
+            stdout_text, stderr_text = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                    capture_output=True,
+                    check=False,
+                )
+            else:
+                killpg = getattr(os, "killpg", None)
+                sigkill = getattr(signal, "SIGKILL", None)
+                if killpg is not None and sigkill is not None:
+                    try:
+                        killpg(process.pid, sigkill)
+                    except OSError:
+                        process.kill()
+                else:
+                    process.kill()
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
             return ToolResult("error", f"command timed out after {timeout}s: {command}")
         duration_ms = int((time.monotonic() - started) * 1000)
-        stdout = (completed.stdout or "")[-MAX_OUTPUT:]
-        stderr = (completed.stderr or "")[-MAX_OUTPUT:]
-        status = "ok" if completed.returncode == 0 else "error"
-        summary = f"exit {completed.returncode} in {duration_ms}ms: {command}"
+        stdout = (stdout_text or "")[-MAX_OUTPUT:]
+        stderr = (stderr_text or "")[-MAX_OUTPUT:]
+        status = "ok" if process.returncode == 0 else "error"
+        summary = f"exit {process.returncode} in {duration_ms}ms: {command}"
         return ToolResult(
             status,
             summary,
             {
                 "command": command,
                 "cwd": str(workdir),
-                "exit_code": completed.returncode,
+                "exit_code": process.returncode,
                 "stdout": stdout,
                 "stderr": stderr,
                 "duration_ms": duration_ms,
@@ -540,7 +605,9 @@ class Workspace:
                         f"refusing to commit sensitive file: {name}",
                     )
             patch = self._git_output(["diff", "--cached", "--unified=0"])
-            if re.search(r"(?i)(sk-[a-z0-9]{10,}|api[_-]?key\s*[=:]\s*\S+)", patch[:200_000]):
+            from .knowledge import SECRET_PATTERNS
+
+            if any(pattern.search(patch) for pattern in SECRET_PATTERNS):
                 return ToolResult("error", "refusing to commit a staged secret")
 
         completed = subprocess.run(

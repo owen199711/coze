@@ -241,7 +241,10 @@ Tools currently available:
 `web` (fetch only). `lsp` and `subagent` return a clear "not available in this milestone"
 message; they are placeholders for M1/M2. `read` is bounded to 400 lines or 12,000
 characters per call and returns `next_start` when there is more; the model-facing
-result budget is `tools.result_max_chars` (default 16,000).
+result budget is `tools.result_max_chars` (default 16,000). In `default` permission
+mode, read-only actions (`knowledge search/get`, `git status/diff/log/show/rev-parse`,
+`plan read`) do not prompt; writes do. `web` re-checks every redirect target and
+rejects private/loopback URLs.
 
 ---
 
@@ -391,7 +394,13 @@ tests/
 - `project.root` is honored, but `project.modules`, `style.profile`, `project.commands.setup`
   and the module graph are not consumed yet (CodebaseService is deferred).
 - `shell` deny list is a guard, not a security boundary; use Docker for untrusted repos.
-- `web` fetch is basic HTML-to-text; private/loopback URLs are rejected; no search provider.
+  It can read files accessible to the process (including `.env`) and access absolute
+  paths outside the workspace; `read/edit/search` have the stricter path guard.
+- `search` content mode rejects oversized and obvious nested-quantifier regexes and
+  the scan is bounded by time, but Python regex can still backtrack on pathological
+  patterns; prefer simple regexes.
+- `web` fetch is basic HTML-to-text; private/loopback URLs and private redirect
+  targets are rejected; no search provider.
 - The TUI has basic collapsible tool cards; diff/plan panels and full interrupt handling are pending.
 - The AgentScope adapter is experimental; text-turn restoration works, but tool-call history and middleware are pending.
 - `atlas eval` uses visible fixture tests, not hidden acceptance tests; treat its
