@@ -81,8 +81,7 @@ atlas
 ### Terminal UI
 
 `atlas` in a real terminal opens a full-screen Textual UI (opencode-style entry
-point). Piped/non-TTY use falls back to the plain `atlas chat` loop. A visual
-mockup lives at [design/atlas-ui.html](design/atlas-ui.html).
+point). Piped/non-TTY use falls back to the plain `atlas chat` loop.
 
 | Command | Meaning |
 |---|---|
@@ -128,6 +127,24 @@ Try the bundled example:
 > real DeepSeek `deepseek-chat` run with streaming on and off. Prior user/assistant
 > text turns are restored when you pass `sessions=atlas.sessions`; tool-call history
 > replay and middleware are still pending.
+
+### Interactive web prototype
+
+There is also a self-contained interactive web prototype at
+[`design/atlas-ui.html`](design/atlas-ui.html). It supports:
+
+- sending messages and watching the reply stream in;
+- session history in `localStorage` (new/switch/search/delete);
+- per-reply process detail: plan, tool calls, read/search results, edit diffs,
+  check output and recalled knowledge;
+- context and knowledge tabs, command/file palettes, stop, export and mobile layout.
+
+Previews: [chat](design/atlas-ui-preview.png) · [process detail](design/atlas-ui-chat.png) ·
+[mobile](design/atlas-ui-mobile.png). The prototype deliberately runs a local
+simulation; wiring the same UI to the real daemon (streaming JSON-RPC + CORS) is
+the next step. Open the file directly in a browser — no build step is needed.
+
+![Atlas interactive UI](design/atlas-ui-preview.png)
 
 ---
 
