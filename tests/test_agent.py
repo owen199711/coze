@@ -375,6 +375,28 @@ def test_max_turns_exceeded_carries_messages(tmp_path: Path) -> None:
         atlas.close()
 
 
+def test_max_turns_exceeded_keeps_partial_work(tmp_path: Path) -> None:
+    """A raised MaxTurnsExceeded must not lose the tool evidence gathered."""
+    (tmp_path / "README.md").write_text("hello project\n", encoding="utf-8")
+    atlas = Atlas.init(tmp_path, name="max-turns-partial-test")
+    try:
+        atlas.config.max_turns = 2
+        atlas.config.max_tool_calls = 50
+        atlas._model = DistinctToolModel(calls=10)
+        session = atlas.create_session("max-turns-partial")
+        with pytest.raises(MaxTurnsExceeded):
+            atlas.chat(session["id"], "keep reading forever")
+
+        state = atlas.sessions.load_state(session["id"]) or {}
+        saved = state.get("messages") or []
+        assert any(message.get("role") == "tool" for message in saved)
+        assert any(message.get("role") == "assistant" for message in saved)
+        events = [row["type"] for row in atlas.sessions.events(session["id"])]
+        assert "turn.max_turns_exceeded" in events
+    finally:
+        atlas.close()
+
+
 def test_max_turns_default_is_ten(tmp_path: Path) -> None:
     """ADR-0002: default aligns with openai-agents."""
     atlas = Atlas.init(tmp_path, name="agent-max-turns-default-test")

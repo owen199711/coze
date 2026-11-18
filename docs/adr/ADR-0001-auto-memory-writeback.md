@@ -1,12 +1,12 @@
 # ADR-0001: 回合结束自动写回候选记忆（Auto Memory Writeback）
 
-- **状态**: Deferred (M1)
+- **状态**: Partially superseded by ADR-0004
 - **日期**: 2026-11-17
 - **决策者**: Atlas 维护者
 - **相关**: `docs/lean-atlas-v1.md` §5.2 写入策略、§6 中间件表；`docs/m0-task-board.md`
 
-> 2026-11-18 更新：本 ADR 仍是 Proposed/Deferred，M0 未实现自动写回；当前知识写入
-> 只走 `knowledge` 工具或 `atlas knowledge add`。README 的 Known limits 已同步。
+> 2026-11-19 更新：ADR-0004 已落地保守的 candidate capture（显式纠正/偏好短语），
+> 但完整语义抽取、自动 active 写回和 Review 流程仍 Deferred。
 
 ## 背景
 

@@ -12,7 +12,7 @@ from .curator import CuratorJob
 from .daemon import serve
 from .demo import run_demo
 from .eval import run_suite
-from .knowledge import VALID_KINDS, VALID_SCOPES
+from .knowledge import VALID_KINDS, VALID_SCOPES, VALID_STATUSES
 from .llm import ModelError
 from .orchestrator import Atlas
 
@@ -144,10 +144,37 @@ def cmd_knowledge_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_knowledge_list(args: argparse.Namespace) -> int:
+    atlas = Atlas(args.path)
+    items = atlas.knowledge.list(
+        scope=args.scope,
+        kind=args.kind,
+        status=args.status,
+        limit=args.limit,
+    )
+    _print(
+        [
+            {
+                "id": item.id,
+                "kind": item.kind,
+                "scope": item.scope,
+                "status": item.status,
+                "title": item.title,
+                "confidence": item.confidence,
+            }
+            for item in items
+        ]
+    )
+    atlas.close()
+    return 0
+
+
 def cmd_knowledge_validate(args: argparse.Namespace) -> int:
     atlas = Atlas(args.path)
     ok = atlas.knowledge.promote(
-        args.id, {"method": "human", "result": "passed", "note": args.note or ""}
+        args.id,
+        {"method": "human", "result": "passed", "note": args.note or ""},
+        actor="human",
     )
     _print({"ok": ok, "id": args.id})
     atlas.close()
@@ -156,7 +183,10 @@ def cmd_knowledge_validate(args: argparse.Namespace) -> int:
 
 def cmd_curator(args: argparse.Namespace) -> int:
     atlas = Atlas(args.path)
-    result = CuratorJob(atlas).run_once(use_llm=getattr(args, "llm", False))
+    result = CuratorJob(atlas).run_once(
+        use_llm=getattr(args, "llm", False),
+        replay=getattr(args, "replay", False),
+    )
     _print(result)
     atlas.close()
     return 0 if result.get("ok") else 1
@@ -256,6 +286,14 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_add.add_argument("--path", default=".")
     knowledge_add.set_defaults(func=cmd_knowledge_add)
 
+    knowledge_list = knowledge_sub.add_parser("list", help="list knowledge items by status")
+    knowledge_list.add_argument("--status", default="active", choices=sorted(VALID_STATUSES))
+    knowledge_list.add_argument("--kind", default=None, choices=sorted(VALID_KINDS))
+    knowledge_list.add_argument("--scope", default=None, choices=sorted(VALID_SCOPES))
+    knowledge_list.add_argument("--limit", type=int, default=50)
+    knowledge_list.add_argument("--path", default=".")
+    knowledge_list.set_defaults(func=cmd_knowledge_list)
+
     knowledge_validate = knowledge_sub.add_parser("validate")
     knowledge_validate.add_argument("id")
     knowledge_validate.add_argument("--note", default=None, help="validation evidence/note")
@@ -270,6 +308,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--llm",
         action="store_true",
         help="ask the configured model for root-cause analysis (falls back to deterministic)",
+    )
+    curator_run.add_argument(
+        "--replay",
+        action="store_true",
+        help="re-run the recorded failed command and promote candidates only on pass",
     )
     curator_run.set_defaults(func=cmd_curator)
 

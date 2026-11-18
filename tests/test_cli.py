@@ -34,3 +34,37 @@ def test_main_without_subcommand_uses_tui_for_a_tty(monkeypatch) -> None:
     monkeypatch.setattr("atlas.cli.cmd_tui", fake_tui)
     assert main([]) == 0
     assert seen == {"path": ".", "session": None}
+
+
+def test_knowledge_list_surfaces_candidates(tmp_path, capsys) -> None:
+    """Candidates must be listable, otherwise `knowledge validate` has no id to take.
+
+    `search()` hardcodes `status = 'active'` and `list()` defaults to
+    `status="active"`, so curator-mined lessons were unreachable from the CLI.
+    """
+    from atlas.knowledge import KnowledgeItem
+    from atlas.orchestrator import Atlas
+
+    atlas = Atlas.init(tmp_path, name="list-candidates")
+    try:
+        item_id = atlas.knowledge.write(
+            KnowledgeItem(
+                title="Retry flaky test",
+                body="Re-run the suite once before blaming the change.",
+                kind="lesson",
+                scope="project",
+                status="candidate",
+                project_id=atlas.project_id,
+            )
+        )
+    finally:
+        atlas.close()
+
+    assert main(["knowledge", "list", "--path", str(tmp_path), "--status", "candidate"]) == 0
+    out = capsys.readouterr().out
+    assert item_id in out
+    assert "Retry flaky test" in out
+
+    # Default status stays "active", so candidates do not leak into normal recall.
+    assert main(["knowledge", "list", "--path", str(tmp_path)]) == 0
+    assert item_id not in capsys.readouterr().out

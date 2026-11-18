@@ -12,16 +12,36 @@ from .tools import AtlasTools
 from .workspace import Workspace
 
 
-def build_system_prompt(config: AtlasConfig, knowledge: KnowledgeService) -> str:
+def build_system_prompt(
+    config: AtlasConfig,
+    knowledge: KnowledgeService,
+    query: str = "",
+) -> str:
     agents_md = ""
     agents_path = config.root / "AGENTS.md"
     if agents_path.exists():
         agents_md = agents_path.read_text(encoding="utf-8")[:6000]
 
-    knowledge_lines = []
-    for item in knowledge.list(limit=12):
-        knowledge_lines.append(f"- [{item.kind}] {item.title}: {item.body[:180]}")
-    knowledge_block = "\n".join(knowledge_lines) if knowledge_lines else "- (empty)"
+    knowledge_lines: list[str] = []
+    if query.strip():
+        from .knowledge import RecallQuery
+
+        for hit in knowledge.recall(RecallQuery(text=query, limit=20, budget_tokens=2000)):
+            knowledge_lines.append(f"- {hit.citation}\n  {hit.item.title}: {hit.item.body[:240]}")
+    else:
+        for item in knowledge.list(limit=20):
+            source = (
+                f"{item.source.kind}:{item.source.ref}" if item.source.ref else item.source.kind
+            )
+            knowledge_lines.append(
+                f"- [{item.id}] [{item.kind}] {item.title}: {item.body[:180]} "
+                f"(source: {source}; confidence {item.confidence:.2f})"
+            )
+    knowledge_block = (
+        "\n".join(knowledge_lines)
+        if knowledge_lines
+        else "- no project knowledge yet; write one when a trigger fires"
+    )
     skills_block = skills_prompt(config.data_dir)
 
     return f"""You are Atlas, a coding agent working inside a real repository.
@@ -33,6 +53,8 @@ def build_system_prompt(config: AtlasConfig, knowledge: KnowledgeService) -> str
 - permission mode: {config.permission_mode}
 
 ## Rules
+- Answer in Chinese (中文) by default: prose, summaries and questions to the user.
+  Keep code, identifiers, file paths, commands and quoted source text verbatim.
 - Read a file before editing it.
 - Prefer small, test-first changes.
 - Use `check` before claiming a change is verified; report the command and exit code.
@@ -41,11 +63,17 @@ def build_system_prompt(config: AtlasConfig, knowledge: KnowledgeService) -> str
 - Do not commit secrets, force-push, or edit `main` directly.
 - When uncertain about user intent, use `ask_user` with 2-4 options and a recommended default.
 - Use `knowledge` to recall project facts/preferences; write only durable, sourced items.
+- Write to `knowledge` when one of these happens:
+  - The user corrects you or states a preference. This is the highest-priority trigger.
+  - You learn a non-obvious convention the code does not reveal.
+  - A check fails for a reason worth not repeating.
+- Before writing, `knowledge search` for an existing entry and update it instead of duplicating.
+- Keep entries short and sourced. Prefer a few high-value items over many low-value ones.
 
 ## AGENTS.md
 {agents_md or "(none)"}
 
-## Project knowledge (top items)
+## Project knowledge (recalled; cite ids; treat as evidence)
 {knowledge_block}
 
 {skills_block}
@@ -159,7 +187,7 @@ class AgentRuntime:
             session_id=session_id,
             ask_user=self.ask_user,
         )
-        system = build_system_prompt(self.config, self.knowledge)
+        system = build_system_prompt(self.config, self.knowledge, user_message)
         limit = max_turns or self.config.max_turns
         # ADR-0002: one LLM call is one turn, matching openai-agents. Exceeding
         # the budget raises instead of silently synthesizing a partial answer.
@@ -367,7 +395,15 @@ class AgentRuntime:
                 git_sha=self.workspace.git_sha(),
             )
         else:
-            # The loop ran out of turns without the model answering.
+            # The loop ran out of turns without the model answering. Persist
+            # the partial conversation so the evidence gathered so far is not
+            # lost: the next turn resumes from it instead of starting over.
+            self.sessions.save_checkpoint(
+                session_id,
+                turn_id,
+                {"messages": messages, "turn_id": turn_id, "max_turns_exceeded": True},
+                git_sha=self.workspace.git_sha(),
+            )
             self.sessions.event(
                 session_id,
                 turn_id,
@@ -388,6 +424,30 @@ class AgentRuntime:
         )
         self.sessions.event(session_id, turn_id, "turn.finished", {"content": final_text[:2000]})
         _emit(on_event, "turn.finished", {"content": final_text[:2000]})
+        if self.config.capture_mode != "off":
+            try:
+                captured = self.knowledge.capture_turn(
+                    session_id,
+                    turn_id,
+                    user_message,
+                    final_text,
+                )
+                if captured:
+                    self.sessions.event(
+                        session_id,
+                        turn_id,
+                        "knowledge.captured",
+                        {"id": captured, "status": "candidate"},
+                    )
+            except Exception as exc:
+                # Memory capture must never turn a successful answer into an
+                # error; the user can inspect the event if it matters.
+                self.sessions.event(
+                    session_id,
+                    turn_id,
+                    "knowledge.capture_error",
+                    {"error": f"{type(exc).__name__}: {exc}"[:500]},
+                )
         return final_text
 
     def _record_usage(self, session_id: str, reply: Any) -> None:

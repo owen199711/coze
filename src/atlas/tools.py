@@ -409,16 +409,24 @@ class AtlasTools:
         if action == "write":
             if not title or not body:
                 return ToolResult("error", "title and body are required for write")
+            item_kind = kind or "fact"
             item = KnowledgeItem(
                 title=title,
                 body=body,
-                kind=kind or "fact",
+                kind=item_kind,
                 scope=scope or "project",
-                status="candidate" if (kind or "fact") == "lesson" else "active",
+                # Agent-originated semantic memory starts as a candidate.
+                # Commands/docs/contracts are evidence-like and can be active.
+                status=(
+                    "candidate"
+                    if item_kind in {"lesson", "preference", "decision", "assumption", "fact"}
+                    else "active"
+                ),
                 project_id=self.knowledge.project_id,
+                trust="derived",
                 source=SourceRef(kind="session", ref=source or self.session_id),
             )
-            item_id = self.knowledge.write(item)
+            item_id = self.knowledge.write(item, actor="agent")
             return ToolResult("ok", f"wrote knowledge {item_id}", {"id": item_id})
         if action == "validate":
             if not id:
@@ -426,12 +434,24 @@ class AtlasTools:
             if not validation:
                 return ToolResult(
                     "error",
-                    "validation evidence is required to promote a candidate "
-                    "(replay/test/human result)",
+                    "validation evidence is required to promote a candidate (replay/test result)",
+                )
+            evidence = validation.strip()
+            lower = evidence.lower()
+            if lower.startswith("replay:"):
+                method = "replay"
+            elif lower.startswith("test:"):
+                method = "test"
+            else:
+                return ToolResult(
+                    "error",
+                    "the agent must provide replay:/test: evidence; "
+                    "manual promotion is a human/CLI action",
                 )
             ok = self.knowledge.promote(
                 id,
-                {"method": "manual", "result": "passed", "note": validation},
+                {"method": method, "result": "passed", "note": evidence},
+                actor="agent",
             )
             return ToolResult("ok" if ok else "error", "knowledge promoted" if ok else "not found")
         if action == "feedback":

@@ -148,6 +148,11 @@ class Atlas:
             )
         ]
         base_tables = [table for table in tables if not table.startswith("knowledge_fts")]
+        knowledge_stats = self.knowledge.stats()
+        status_counts: dict[str, int] = {}
+        for by_status in knowledge_stats.values():
+            for status, count in by_status.items():
+                status_counts[status] = status_counts.get(status, 0) + count
         return {
             "root": str(self.config.root),
             "db": str(self.config.db_path),
@@ -163,7 +168,9 @@ class Atlas:
             "max_turns": self.config.max_turns,
             "max_tool_calls": self.config.max_tool_calls,
             "test_command": self.config.test_command,
-            "knowledge_items": sum(sum(v.values()) for v in self.knowledge.stats().values()),
+            "knowledge_items": sum(status_counts.values()),
+            "knowledge_status": status_counts,
+            "knowledge_kinds": knowledge_stats,
         }
 
     def close(self) -> None:

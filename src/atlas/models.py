@@ -50,6 +50,8 @@ class KnowledgeItem:
     freshness_at: str = field(default_factory=utcnow)
     expires_at: str | None = None
     sensitivity: str = "internal"  # public | internal | secret
+    source_hash: str | None = None
+    trust: str = "trusted"  # trusted | derived | untrusted
     created_at: str = field(default_factory=utcnow)
     updated_at: str = field(default_factory=utcnow)
     use_count: int = 0

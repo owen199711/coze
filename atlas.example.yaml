@@ -17,6 +17,7 @@ style:
 
 learning:
   enabled: true
+  capture: candidate
   idle_minutes: 15
   budget:
     max_cost_usd_per_night: 2.0

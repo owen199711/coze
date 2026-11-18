@@ -11,6 +11,7 @@ class ConfigError(RuntimeError):
 
 
 VALID_PERMISSION_MODES = {"default", "accept_edits", "explore", "dont_ask"}
+VALID_CAPTURE_MODES = {"off", "candidate"}
 
 
 @dataclass
@@ -31,7 +32,9 @@ class AtlasConfig:
     format_command: str | None = None
     style_profile: str = "pep8-ruff"
     learning_enabled: bool = True
+    capture_mode: str = "candidate"
     idle_minutes: int = 15
+    learning_budget_usd: float = 2.0
     permission_mode: str = "accept_edits"
     model_provider: str = "openai-compatible"
     model_name: str = ""
@@ -119,6 +122,7 @@ def load_config(root: str | Path = ".") -> AtlasConfig:
     commands = project.get("commands") or {}
     style = data.get("style") or {}
     learning = data.get("learning") or {}
+    learning_budget = learning.get("budget") or {}
     permissions = data.get("permissions") or {}
     model = data.get("model") or {}
 
@@ -133,6 +137,12 @@ def load_config(root: str | Path = ".") -> AtlasConfig:
             f"invalid permissions.mode: {permission_mode!r}; "
             f"expected one of {', '.join(sorted(VALID_PERMISSION_MODES))}"
         )
+    capture_mode = str(learning.get("capture") or "candidate")
+    if capture_mode not in VALID_CAPTURE_MODES:
+        raise ConfigError(
+            f"invalid learning.capture: {capture_mode!r}; "
+            f"expected one of {', '.join(sorted(VALID_CAPTURE_MODES))}"
+        )
 
     return AtlasConfig(
         root=root_path,
@@ -145,7 +155,9 @@ def load_config(root: str | Path = ".") -> AtlasConfig:
         format_command=commands.get("format"),
         style_profile=str(style.get("profile") or "pep8-ruff"),
         learning_enabled=bool(learning.get("enabled", True)),
+        capture_mode=capture_mode,
         idle_minutes=int(learning.get("idle_minutes", 15)),
+        learning_budget_usd=float(learning_budget.get("max_cost_usd_per_night", 2.0)),
         permission_mode=permission_mode,
         model_provider=str(model.get("provider") or "openai-compatible"),
         model_name=str(model.get("name") or ""),
@@ -179,6 +191,7 @@ style:
 
 learning:
   enabled: true
+  capture: candidate
   idle_minutes: 15
   budget:
     max_cost_usd_per_night: 2.0

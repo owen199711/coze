@@ -83,10 +83,14 @@ class AtlasRPC:
                     "ok": atlas.knowledge.promote(
                         params.get("id", ""),
                         params.get("validation") or {"method": "human", "result": "passed"},
+                        actor="human",
                     )
                 }
             if method == "curator.run":
-                return CuratorJob(atlas).run_once(use_llm=params.get("llm") is True)
+                return CuratorJob(atlas).run_once(
+                    use_llm=params.get("llm") is True,
+                    replay=params.get("replay") is True,
+                )
             raise ValueError(f"unknown method: {method}")
         finally:
             atlas.close()

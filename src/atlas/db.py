@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -145,6 +146,8 @@ CREATE TABLE IF NOT EXISTS knowledge_items (
   expires_at      TEXT,
   supersedes_json TEXT,
   sensitivity     TEXT DEFAULT 'internal',
+  source_hash     TEXT,
+  trust           TEXT NOT NULL DEFAULT 'trusted',
   dedupe_key      TEXT,
   use_count       INTEGER DEFAULT 0,
   last_used_at    TEXT,
@@ -203,12 +206,26 @@ class Database:
     def initialize(self) -> None:
         conn = self.connect()
         conn.executescript(SCHEMA)
+        self._migrate_knowledge_columns(conn)
         self._repair_duplicate_turn_seqs(conn)
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_session_seq ON turns(session_id, seq)"
         )
-        conn.execute("PRAGMA user_version = 1")
+        conn.execute("PRAGMA user_version = 2")
         conn.commit()
+
+    @staticmethod
+    def _migrate_knowledge_columns(conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(knowledge_items)").fetchall()
+        }
+        if "source_hash" not in columns:
+            conn.execute("ALTER TABLE knowledge_items ADD COLUMN source_hash TEXT")
+        if "trust" not in columns:
+            conn.execute(
+                "ALTER TABLE knowledge_items ADD COLUMN trust TEXT NOT NULL DEFAULT 'trusted'"
+            )
 
     @staticmethod
     def _repair_duplicate_turn_seqs(conn: sqlite3.Connection) -> None:
@@ -232,6 +249,21 @@ class Database:
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         return self.connect().execute(sql, tuple(params))
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Run a group of writes atomically across the shared connection."""
+        conn = self.connect()
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+        except Exception:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
 
     def fetchone(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Row | None:
         return self.execute(sql, params).fetchone()

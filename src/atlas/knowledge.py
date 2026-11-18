@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Iterable
 
 from .db import Database
@@ -24,7 +26,39 @@ VALID_KINDS = {
 VALID_SCOPES = {"user", "project", "org"}
 VALID_STATUSES = {"candidate", "active", "stale", "retired", "quarantined"}
 VALID_SENSITIVITIES = {"public", "internal", "secret"}
+VALID_TRUST = {"trusted", "derived", "untrusted"}
+
+SECRET_PATTERNS = (
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
+    re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(
+        r"(?i)(api[_-]?key|secret|password|token)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{12,}"
+    ),
+)
 VALIDATION_PASSED = {"passed", "pass", "ok", "verified", "success"}
+
+# CJK 字符（含中日韩统一表意文字、假名、谚文、全角标点）在多数分词器里
+# 约等于 1 字 1 token，而 ASCII 约 4 字符 1 token。旧实现统一用 len//4，
+# 会让中文记忆的预算成本被低估约 4 倍。
+_CJK_RE = re.compile(
+    r"[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]"
+)
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token estimate that does not undercount CJK text.
+
+    CJK characters count as one token each; the remaining characters count
+    as one token per four. Always returns at least 1 so that empty or
+    whitespace-only content still costs something against a budget.
+    """
+    if not text:
+        return 1
+    cjk = len(_CJK_RE.findall(text))
+    other = len(text) - cjk
+    return max(1, cjk + other // 4)
 
 
 def _validation_passed(validation: dict[str, Any] | None) -> bool:
@@ -39,6 +73,59 @@ class KnowledgeHit:
     item: KnowledgeItem
     score: float
     snippet: str
+    origin: str = "fts"
+    chunk_id: str | None = None
+
+
+DEFAULT_KIND_BUDGETS = {
+    "preference": 300,
+    "fact": 800,
+    "decision": 800,
+    "lesson": 800,
+    "doc": 3000,
+    "command": 300,
+    "contract": 500,
+    "assumption": 300,
+    "glossary": 300,
+}
+
+KIND_HALF_LIFE_DAYS = {
+    "preference": 3650,
+    "fact": 365,
+    "decision": 3650,
+    "lesson": 180,
+    "doc": 180,
+    "command": 365,
+    "contract": 365,
+    "assumption": 30,
+    "glossary": 3650,
+}
+
+SEVERITY_WEIGHT = {"low": 0.8, "medium": 1.0, "high": 1.2}
+
+# Long-lived but not permanent: an item nobody recalled within this window is
+# stale. Docs/lessons/assumptions have their own rules in consolidate().
+KIND_STALE_DAYS = {"fact": 365, "command": 180, "contract": 365}
+
+
+@dataclass(frozen=True)
+class RecallQuery:
+    text: str
+    scope: str | None = None
+    kinds: tuple[str, ...] | None = None
+    limit: int = 8
+    budget_tokens: int = 2000
+    per_kind_budget: dict[str, int] | None = None
+    allow_untrusted: bool = False
+
+
+@dataclass
+class RecallHit:
+    item: KnowledgeItem
+    score: float
+    snippet: str
+    citation: str
+    reasons: dict[str, float]
 
 
 class KnowledgeService:
@@ -78,7 +165,7 @@ class KnowledgeService:
     def write(
         self,
         item: KnowledgeItem,
-        actor: str = "agent",
+        actor: str = "system",
         allow_secret: bool = False,
     ) -> str:
         if item.kind not in VALID_KINDS:
@@ -89,8 +176,15 @@ class KnowledgeService:
             raise ValueError(f"invalid status: {item.status}")
         if item.sensitivity not in VALID_SENSITIVITIES:
             raise ValueError(f"invalid sensitivity: {item.sensitivity}")
+        if item.trust not in VALID_TRUST:
+            raise ValueError(f"invalid trust: {item.trust}")
         if item.sensitivity == "secret" and not allow_secret:
             raise ValueError("secret knowledge is not stored by default")
+        if not allow_secret and any(
+            pattern.search(item.title) or pattern.search(item.body)
+            for pattern in SECRET_PATTERNS
+        ):
+            raise ValueError("refusing to store likely secret material in knowledge")
         if not item.title.strip() or not item.body.strip():
             raise ValueError("title and body are required")
         if (
@@ -101,6 +195,21 @@ class KnowledgeService:
             raise ValueError(
                 "lesson requires a passed validation (replay/test/human) before status=active"
             )
+        if actor == "agent" and item.status == "active" and item.kind in {
+            "preference",
+            "decision",
+            "fact",
+            "lesson",
+            "assumption",
+        }:
+            raise ValueError(
+                f"{item.kind} written by the agent must be candidate; "
+                "only a user/replay-validated path can activate it"
+            )
+        if item.kind == "assumption" and not item.expires_at:
+            item.expires_at = (
+                datetime.now(timezone.utc) + timedelta(days=30)
+            ).isoformat(timespec="microseconds")
 
         project_id = item.project_id if item.project_id is not None else self.project_id
         if item.scope != "project":
@@ -133,36 +242,37 @@ class KnowledgeService:
                 (existing_item.severity, item.severity),
                 key=lambda value: severity_rank.get(value, 1),
             )
-            self.db.execute(
-                """
-                UPDATE knowledge_items
-                SET status = ?, tags_json = ?, source_json = ?, confidence = MAX(confidence, ?),
-                    severity = ?, validation_json = ?, expires_at = COALESCE(?, expires_at),
-                    updated_at = ?, freshness_at = ?
-                WHERE id = ?
-                """,
-                (
-                    status,
-                    json.dumps(tags, ensure_ascii=False),
-                    json.dumps(source.to_dict(), ensure_ascii=False),
-                    item.confidence,
-                    severity,
-                    json.dumps(validation, ensure_ascii=False) if validation else None,
-                    item.expires_at,
-                    utcnow(),
-                    utcnow(),
-                    existing_item.id,
-                ),
-            )
-            if self._fts:
-                try:
+            with self.db.transaction():
+                self.db.execute(
+                    """
+                    UPDATE knowledge_items
+                    SET status = ?, tags_json = ?, source_json = ?, confidence = MAX(confidence, ?),
+                        severity = ?, validation_json = ?, expires_at = COALESCE(?, expires_at),
+                        source_hash = COALESCE(?, source_hash),
+                        trust = CASE WHEN trust = 'trusted' THEN 'trusted' ELSE ? END,
+                        updated_at = ?, freshness_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        status,
+                        json.dumps(tags, ensure_ascii=False),
+                        json.dumps(source.to_dict(), ensure_ascii=False),
+                        item.confidence,
+                        severity,
+                        json.dumps(validation, ensure_ascii=False) if validation else None,
+                        item.expires_at,
+                        item.source_hash,
+                        item.trust,
+                        utcnow(),
+                        utcnow(),
+                        existing_item.id,
+                    ),
+                )
+                if self._fts:
                     self.db.execute(
                         "UPDATE knowledge_fts SET tags = ? WHERE item_id = ?",
                         (" ".join(tags), existing_item.id),
                     )
-                except Exception:
-                    pass
-            self.db.commit()
             return existing_item.id
 
         now = utcnow()
@@ -170,70 +280,149 @@ class KnowledgeService:
         item.created_at = item.created_at or now
         item.updated_at = now
         item.freshness_at = item.freshness_at or now
-        self.db.execute(
-            """
-            INSERT INTO knowledge_items (
-              id, tenant_id, project_id, owner_id, scope, kind, status, title, body,
-              tags_json, source_json, confidence, severity, validation_json,
-              freshness_at, expires_at, supersedes_json, sensitivity, dedupe_key,
-              use_count, last_used_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
-            """,
-            (
-                item.id,
-                self.tenant_id,
-                project_id,
-                item.owner_id,
-                item.scope,
-                item.kind,
-                item.status,
-                item.title,
-                item.body,
-                json.dumps(item.tags, ensure_ascii=False),
-                json.dumps(item.source.to_dict(), ensure_ascii=False),
-                item.confidence,
-                item.severity,
-                json.dumps(item.validation, ensure_ascii=False) if item.validation else None,
-                item.freshness_at,
-                item.expires_at,
-                json.dumps([], ensure_ascii=False),
-                item.sensitivity,
-                dedupe_key,
-                item.created_at,
-                item.updated_at,
-            ),
-        )
-
-        for ordinal, chunk in enumerate(self._chunks(item.body)):
-            chunk_id = new_id("ch")
+        with self.db.transaction():
             self.db.execute(
                 """
-                INSERT INTO knowledge_chunks
-                (id, item_id, project_id, ordinal, content, symbol, start_line, end_line,
-                 token_count, created_at)
-                VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
+                INSERT INTO knowledge_items (
+                  id, tenant_id, project_id, owner_id, scope, kind, status, title, body,
+                  tags_json, source_json, confidence, severity, validation_json,
+                  freshness_at, expires_at, supersedes_json, sensitivity, source_hash,
+                  trust, dedupe_key, use_count, last_used_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
                 """,
                 (
-                    chunk_id,
                     item.id,
+                    self.tenant_id,
                     project_id,
-                    ordinal,
-                    chunk,
-                    max(1, len(chunk) // 4),
-                    now,
+                    item.owner_id,
+                    item.scope,
+                    item.kind,
+                    item.status,
+                    item.title,
+                    item.body,
+                    json.dumps(item.tags, ensure_ascii=False),
+                    json.dumps(item.source.to_dict(), ensure_ascii=False),
+                    item.confidence,
+                    item.severity,
+                    json.dumps(item.validation, ensure_ascii=False) if item.validation else None,
+                    item.freshness_at,
+                    item.expires_at,
+                    json.dumps([], ensure_ascii=False),
+                    item.sensitivity,
+                    item.source_hash,
+                    item.trust,
+                    dedupe_key,
+                    item.created_at,
+                    item.updated_at,
                 ),
             )
 
-        if self._fts:
-            try:
+            for ordinal, chunk in enumerate(self._chunks(item.body)):
+                chunk_id = new_id("ch")
+                self.db.execute(
+                    """
+                    INSERT INTO knowledge_chunks
+                    (id, item_id, project_id, ordinal, content, symbol, start_line, end_line,
+                     token_count, created_at)
+                    VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
+                    """,
+                    (
+                        chunk_id,
+                        item.id,
+                        project_id,
+                        ordinal,
+                        chunk,
+                        estimate_tokens(chunk),
+                        now,
+                    ),
+                )
+
+            if self._fts:
                 self.db.execute(
                     "INSERT INTO knowledge_fts(item_id, title, body, tags) VALUES (?, ?, ?, ?)",
                     (item.id, item.title, item.body, " ".join(item.tags)),
                 )
-            except Exception:
-                pass
-        self.db.commit()
         return item.id
+
+    def refresh_sources(self, workspace_root: str | Path | None = None) -> dict[str, int]:
+        """Hash file-backed docs/commands/contracts and stale changed sources."""
+        if workspace_root is None:
+            return {"checked": 0, "stale": 0}
+        root = Path(workspace_root).resolve()
+        rows = self.db.fetchall(
+            "SELECT * FROM knowledge_items WHERE tenant_id = ? AND status = 'active' "
+            "AND kind IN ('doc', 'command', 'contract') "
+            "AND (scope != 'project' OR project_id = ?)",
+            (self.tenant_id, self.project_id),
+        )
+        checked = 0
+        stale = 0
+        for row in rows:
+            item = self._row_to_item(row)
+            if item.source.kind != "file" or not item.source.ref:
+                continue
+            path = Path(item.source.ref)
+            if not path.is_absolute():
+                path = root / path
+            try:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                continue
+            checked += 1
+            if item.source_hash and item.source_hash != digest:
+                self.db.execute(
+                    "UPDATE knowledge_items SET status = 'stale', source_hash = ?, "
+                    "updated_at = ? WHERE id = ?",
+                    (digest, utcnow(), item.id),
+                )
+                stale += 1
+            elif not item.source_hash:
+                self.db.execute(
+                    "UPDATE knowledge_items SET source_hash = ? WHERE id = ?",
+                    (digest, item.id),
+                )
+        if checked:
+            self.db.commit()
+        return {"checked": checked, "stale": stale}
+
+    def capture_turn(
+        self,
+        session_id: str,
+        turn_id: str,
+        user_message: str,
+        assistant_message: str = "",
+    ) -> str | None:
+        """Create a candidate fact when the user explicitly corrects/prefers.
+
+        This is deliberately conservative: only explicit correction/preference
+        phrases are captured, and only as `candidate`. It never writes active
+        knowledge and never runs an extra model call.
+        """
+        text = (user_message or "").strip()
+        if not text:
+            return None
+        marker = re.search(
+            r"(记住|以后都|以后请|不是这样|不对|应该是|不要用|"
+            r"remember|prefer|instead|actually|do not|don't)",
+            text,
+            re.IGNORECASE,
+        )
+        if not marker:
+            return None
+        title = " ".join(text.split())[:80]
+        item = KnowledgeItem(
+            title=title or "Captured preference",
+            body=text[:2000],
+            kind="fact",
+            scope="project",
+            status="candidate",
+            project_id=self.project_id,
+            confidence=0.55,
+            trust="derived",
+            validation={"method": "rule-capture", "status": "unvalidated"},
+            source=SourceRef(kind="session", ref=f"{session_id}:{turn_id}"),
+        )
+        return self.write(item, actor="agent")
 
     def _chunks(self, body: str, size: int = 900) -> list[str]:
         paragraphs = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
@@ -279,8 +468,13 @@ class KnowledgeService:
         # Older SQLite builds may lack JSON1; fall back to a literal scan.
         row = self.db.fetchone(
             "SELECT * FROM knowledge_items WHERE tenant_id = ? AND kind = ? "
-            "AND (scope != 'project' OR project_id = ?) AND source_json LIKE ? LIMIT 1",
-            (self.tenant_id, kind, self.project_id, f'%"{ref}"%'),
+            "AND (scope != 'project' OR project_id = ?) AND source_json LIKE ? ESCAPE '\\' LIMIT 1",
+            (
+                self.tenant_id,
+                kind,
+                self.project_id,
+                f'%"{self._escape_like(ref)}"%',
+            ),
         )
         return self._row_to_item(row) if row else None
 
@@ -291,6 +485,7 @@ class KnowledgeService:
         kinds: Iterable[str] | None = None,
         limit: int = 8,
         budget_tokens: int = 2000,
+        record_usage: bool = True,
     ) -> list[KnowledgeHit]:
         query = (query or "").strip()
         if not query:
@@ -321,9 +516,10 @@ class KnowledgeService:
             sql = """
                 SELECT * FROM knowledge_items
                 WHERE tenant_id = ? AND status = 'active'
-                  AND (title LIKE ? OR body LIKE ? OR tags_json LIKE ?)
+                  AND (title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\'
+                       OR tags_json LIKE ? ESCAPE '\\')
             """
-            like = f"%{query}%"
+            like = f"%{self._escape_like(query)}%"
             params = [self.tenant_id, like, like, like]
             sql, params = self._apply_filters(sql, params, scope, kinds_list)
             sql += " ORDER BY confidence DESC, updated_at DESC LIMIT ?"
@@ -331,30 +527,41 @@ class KnowledgeService:
             for row in self.db.fetchall(sql, params):
                 rows.append((row, 0.0))
 
+        hits_by_id: dict[str, KnowledgeHit] = {}
+        for row, rank in rows:
+            item = self._row_to_item(row)
+            hits_by_id[item.id] = KnowledgeHit(
+                item=item,
+                score=(-rank) if rank else float(item.confidence),
+                snippet=self._snippet(item.body, query),
+                origin="fts" if rank else "like",
+            )
+
+        for chunk_hit in self._chunk_hits(
+            query, scope, kinds_list, limit=max(limit * 3, 24)
+        ):
+            existing = hits_by_id.get(chunk_hit.item.id)
+            if existing is None:
+                hits_by_id[chunk_hit.item.id] = chunk_hit
+                continue
+            if chunk_hit.score > existing.score:
+                existing.score = chunk_hit.score
+            existing.origin = "hybrid"
+            existing.snippet = chunk_hit.snippet
+            existing.chunk_id = chunk_hit.chunk_id
+
         hits: list[KnowledgeHit] = []
         used = 0
-        seen: set[str] = set()
-        for row, rank in rows:
-            item_id = str(row["id"])
-            if item_id in seen:
-                continue
-            seen.add(item_id)
-            item = self._row_to_item(row)
-            cost = max(1, len(item.body) // 4)
+        for hit in sorted(hits_by_id.values(), key=lambda value: value.score, reverse=True):
+            cost = estimate_tokens(hit.item.body)
             if hits and used + cost > budget_tokens:
                 continue
             used += cost
-            hits.append(
-                KnowledgeHit(
-                    item=item,
-                    score=(-rank) if rank else float(item.confidence),
-                    snippet=self._snippet(item.body, query),
-                )
-            )
+            hits.append(hit)
             if len(hits) >= limit:
                 break
 
-        if hits:
+        if hits and record_usage:
             ids = [h.item.id for h in hits]
             placeholders = ",".join("?" for _ in ids)
             self.db.execute(
@@ -364,6 +571,180 @@ class KnowledgeService:
             )
             self.db.commit()
         return hits
+
+    def _chunk_hits(
+        self,
+        query: str,
+        scope: str | None,
+        kinds: list[str] | None,
+        limit: int = 24,
+    ) -> list[KnowledgeHit]:
+        terms = [
+            term
+            for term in re.findall(r"[\w\u4e00-\u9fff]+", query)
+            if len(term) > 1
+        ][:8]
+        if not terms:
+            return []
+        clauses: list[str] = []
+        params: list[object] = [self.tenant_id]
+        for term in terms:
+            clauses.append("c.content LIKE ? ESCAPE '\\'")
+            params.append(f"%{self._escape_like(term)}%")
+        sql = f"""
+            SELECT ki.*, c.id AS chunk_id, c.content AS chunk_content
+            FROM knowledge_chunks c
+            JOIN knowledge_items ki ON ki.id = c.item_id
+            WHERE ki.tenant_id = ? AND ki.status = 'active'
+              AND ({' OR '.join(clauses)})
+        """
+        sql, params = self._apply_filters(
+            sql, params, scope, kinds, prefix="ki."
+        )
+        sql += " LIMIT ?"
+        params.append(max(limit * 2, 48))
+        best: dict[str, KnowledgeHit] = {}
+        for row in self.db.fetchall(sql, params):
+            item = self._row_to_item(row)
+            content = str(row["chunk_content"] or "")
+            lower = content.lower()
+            hits = sum(lower.count(term.lower()) for term in terms)
+            score = max(1.0, float(hits)) * 0.75
+            current = best.get(item.id)
+            if current is not None and current.score >= score:
+                continue
+            best[item.id] = KnowledgeHit(
+                item=item,
+                score=score,
+                snippet=self._snippet(content, query),
+                origin="chunk",
+                chunk_id=str(row["chunk_id"]),
+            )
+        return sorted(best.values(), key=lambda value: value.score, reverse=True)[:limit]
+
+    def recall(self, query: RecallQuery | str) -> list[RecallHit]:
+        """Return a task-aware, budgeted memory window with citations.
+
+        `search()` remains the raw retrieval primitive. `recall()` adds the
+        ranking, per-kind budgets and citation formatting used by the prompt.
+        """
+        if isinstance(query, str):
+            query = RecallQuery(text=query)
+        text = query.text.strip()
+        if not text:
+            items = [
+                item
+                for item in self.list(limit=query.limit)
+                if query.allow_untrusted or item.trust != "untrusted"
+            ]
+            return [
+                RecallHit(
+                    item=item,
+                    score=float(item.confidence),
+                    snippet=item.body[:240],
+                    citation=self._citation(item),
+                    reasons={"empty_query": 1.0},
+                )
+                for item in items
+            ]
+
+        candidates = self.search(
+            text,
+            scope=query.scope,
+            kinds=query.kinds,
+            limit=max(query.limit * 4, 24),
+            budget_tokens=max(query.budget_tokens * 4, 8000),
+            record_usage=False,
+        )
+        if not candidates:
+            return []
+
+        max_score = max((hit.score for hit in candidates), default=1.0) or 1.0
+        now = datetime.now(timezone.utc)
+        per_kind = query.per_kind_budget or DEFAULT_KIND_BUDGETS
+        ranked: list[tuple[float, RecallHit]] = []
+        for hit in candidates:
+            item = hit.item
+            if item.trust == "untrusted" and not query.allow_untrusted:
+                continue
+            relevance = min(1.0, max(0.05, float(hit.score) / max_score))
+            confidence = min(1.0, max(0.0, item.confidence))
+            freshness = self._freshness(item, now)
+            severity = SEVERITY_WEIGHT.get(item.severity, 1.0)
+            score = (relevance**1.2) * confidence * freshness * severity
+            ranked.append(
+                (
+                    score,
+                    RecallHit(
+                        item=item,
+                        score=score,
+                        snippet=hit.snippet,
+                        citation=self._citation(item),
+                        reasons={
+                            "relevance": relevance,
+                            "confidence": confidence,
+                            "freshness": freshness,
+                            "severity": severity,
+                        },
+                    ),
+                )
+            )
+
+        selected: list[RecallHit] = []
+        used = 0
+        kind_used: dict[str, int] = {}
+        seen: set[str] = set()
+        for _score, recall_hit in sorted(ranked, key=lambda pair: pair[0], reverse=True):
+            if recall_hit.item.id in seen:
+                continue
+            cost = estimate_tokens(recall_hit.item.body)
+            kind = recall_hit.item.kind
+            kind_budget = per_kind.get(kind, 800)
+            if selected and used + cost > query.budget_tokens:
+                continue
+            if selected and kind_used.get(kind, 0) + cost > kind_budget:
+                continue
+            seen.add(recall_hit.item.id)
+            selected.append(recall_hit)
+            used += cost
+            kind_used[kind] = kind_used.get(kind, 0) + cost
+            if len(selected) >= query.limit:
+                break
+
+        if selected:
+            ids = [hit.item.id for hit in selected]
+            placeholders = ",".join("?" for _ in ids)
+            self.db.execute(
+                f"UPDATE knowledge_items SET use_count = use_count + 1, last_used_at = ? "
+                f"WHERE id IN ({placeholders})",
+                [utcnow(), *ids],
+            )
+            self.db.commit()
+        return selected
+
+    def _freshness(self, item: KnowledgeItem, now: datetime) -> float:
+        value = item.freshness_at or item.updated_at
+        try:
+            created = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return 0.8
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        age_days = max(0.0, (now - created).total_seconds() / 86400.0)
+        half_life = KIND_HALF_LIFE_DAYS.get(item.kind, 365)
+        return math.exp(-age_days / half_life)
+
+    @staticmethod
+    def _citation(item: KnowledgeItem) -> str:
+        source = f"{item.source.kind}:{item.source.ref}" if item.source.ref else item.source.kind
+        return (
+            f"[{item.id}] {item.kind} · {source} · confidence {item.confidence:.2f} "
+            f"· trust {item.trust}"
+        )
+
+    @staticmethod
+    def _escape_like(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
     def _fts_query(self, query: str) -> str:
         terms = re.findall(r"[\w\u4e00-\u9fff]+", query)
@@ -377,8 +758,10 @@ class KnowledgeService:
         params: list[object],
         scope: str | None,
         kinds: list[str] | None,
+        prefix: str | None = None,
     ) -> tuple[str, list[object]]:
-        prefix = "ki." if "knowledge_fts" in sql else ""
+        if prefix is None:
+            prefix = "ki." if "knowledge_fts" in sql else ""
         # Project isolation: project-scoped rows are visible only to their project.
         sql += f" AND ({prefix}scope != 'project' OR {prefix}project_id = ?)"
         params.append(self.project_id)
@@ -404,19 +787,31 @@ class KnowledgeService:
     # --------------------------------------------------------------- update
     def feedback(self, item_id: str, outcome: str) -> bool:
         row = self.db.fetchone(
-            "SELECT confidence FROM knowledge_items WHERE id = ? AND tenant_id = ? "
+            "SELECT confidence, status FROM knowledge_items WHERE id = ? AND tenant_id = ? "
             "AND (scope != 'project' OR project_id = ?)",
             (item_id, self.tenant_id, self.project_id),
         )
         if not row:
             return False
         confidence = float(row["confidence"] or 0.8)
+        current = str(row["status"] or "active")
         if outcome in {"effective", "used", "good"}:
             confidence = min(1.0, confidence + 0.02)
-            status = "active"
+            # A quarantined item must be re-validated before recall; a
+            # candidate must be promoted. Positive feedback alone cannot
+            # undo either gate.
+            if current in {"quarantined", "candidate"}:
+                status = current
+            else:
+                status = "active"
         elif outcome in {"ineffective", "bad", "wrong"}:
             confidence = max(0.0, confidence - 0.15)
-            status = "quarantined" if confidence < 0.3 else "active"
+            if confidence < 0.3:
+                status = "quarantined"
+            elif current in {"candidate", "quarantined"}:
+                status = current
+            else:
+                status = "active"
         else:
             raise ValueError("outcome must be effective/used/good or ineffective/bad/wrong")
         self.db.execute(
@@ -435,8 +830,18 @@ class KnowledgeService:
         self.db.commit()
         return True
 
-    def promote(self, item_id: str, validation: dict[str, Any] | None = None) -> bool:
+    def promote(
+        self,
+        item_id: str,
+        validation: dict[str, Any] | None = None,
+        actor: str = "agent",
+    ) -> bool:
         if not _validation_passed(validation):
+            return False
+        if actor == "agent" and str((validation or {}).get("method") or "") not in {
+            "replay",
+            "test",
+        }:
             return False
         row = self.db.fetchone(
             "SELECT id FROM knowledge_items WHERE id = ? AND tenant_id = ? "
@@ -536,10 +941,29 @@ class KnowledgeService:
             "AND status = 'candidate' AND created_at < ?",
             (now_iso, self.tenant_id, self.project_id, cutoff_candidate),
         ).rowcount
+        stale_lessons = self.db.execute(
+            "UPDATE knowledge_items SET status = 'stale', updated_at = ? "
+            "WHERE tenant_id = ? AND (scope != 'project' OR project_id = ?) "
+            "AND status = 'active' AND kind = 'lesson' AND use_count = 0 "
+            "AND COALESCE(last_used_at, updated_at) < ?",
+            (now_iso, self.tenant_id, self.project_id, cutoff_stale),
+        ).rowcount
+        stale_items = 0
+        for kind, days in KIND_STALE_DAYS.items():
+            cutoff = (now - timedelta(days=days)).isoformat(timespec="microseconds")
+            stale_items += self.db.execute(
+                "UPDATE knowledge_items SET status = 'stale', updated_at = ? "
+                "WHERE tenant_id = ? AND (scope != 'project' OR project_id = ?) "
+                "AND status = 'active' AND kind = ? AND use_count = 0 "
+                "AND COALESCE(last_used_at, updated_at) < ?",
+                (now_iso, self.tenant_id, self.project_id, kind, cutoff),
+            ).rowcount
         self.db.commit()
         return {
             "expired": int(expired or 0),
             "stale_docs": int(stale_docs or 0),
+            "stale_lessons": int(stale_lessons or 0),
+            "stale_items": int(stale_items or 0),
             "old_candidates": int(old_candidates or 0),
         }
 
@@ -560,9 +984,24 @@ class KnowledgeService:
         import sqlite3
 
         assert isinstance(row, sqlite3.Row)
-        source_data = json.loads(row["source_json"] or "{}")
-        tags = json.loads(row["tags_json"] or "[]")
-        validation = json.loads(row["validation_json"]) if row["validation_json"] else None
+
+        def loads(value: object, default: Any) -> Any:
+            if not value:
+                return default
+            try:
+                return json.loads(str(value))
+            except (TypeError, ValueError):
+                return default
+
+        source_data = loads(row["source_json"], {})
+        tags = loads(row["tags_json"], [])
+        validation = loads(row["validation_json"], None)
+        if not isinstance(source_data, dict):
+            source_data = {}
+        if not isinstance(tags, list):
+            tags = []
+        if not isinstance(validation, dict):
+            validation = None
         return KnowledgeItem(
             id=row["id"],
             tenant_id=row["tenant_id"],
@@ -585,6 +1024,8 @@ class KnowledgeService:
             freshness_at=row["freshness_at"] or row["updated_at"],
             expires_at=row["expires_at"],
             sensitivity=row["sensitivity"] or "internal",
+            source_hash=row["source_hash"] if "source_hash" in row.keys() else None,
+            trust=(row["trust"] if "trust" in row.keys() else "trusted") or "trusted",
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             use_count=int(row["use_count"] or 0),

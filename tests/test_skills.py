@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from atlas.agent import build_system_prompt
+from atlas.models import KnowledgeItem
 from atlas.orchestrator import Atlas
 from atlas.skills import install_skill, list_skills, remove_skill, skills_prompt
 
@@ -48,5 +49,66 @@ def test_system_prompt_includes_installed_skill(tmp_path: Path) -> None:
         prompt = build_system_prompt(atlas.config, atlas.knowledge)
         assert "Installed skills" in prompt
         assert "careful-review" in prompt
+    finally:
+        atlas.close()
+
+
+def test_system_prompt_requires_chinese_answers(tmp_path: Path) -> None:
+    """The constitution must pin the answer language to Chinese."""
+    atlas = Atlas.init(tmp_path, name="answer-language")
+    try:
+        prompt = build_system_prompt(atlas.config, atlas.knowledge)
+        assert "中文" in prompt
+        assert "Answer in Chinese" in prompt
+    finally:
+        atlas.close()
+
+
+def test_system_prompt_states_memory_triggers(tmp_path: Path) -> None:
+    """The prompt must say *when* to write knowledge, not just what is allowed.
+
+    Auto memory only works if the model knows the trigger conditions; the
+    previous wording ("write only durable, sourced items") constrained the
+    content but never named a moment to write.
+    """
+    atlas = Atlas.init(tmp_path, name="memory-triggers")
+    try:
+        prompt = build_system_prompt(atlas.config, atlas.knowledge)
+        # Highest-priority trigger: the user corrects us or states a preference.
+        assert "corrects you" in prompt
+        # Dedupe: search before writing so entries are updated, not duplicated.
+        assert "search" in prompt.lower()
+        # Brevity: few high-value items beat many low-value ones.
+        assert "few" in prompt.lower()
+    finally:
+        atlas.close()
+
+
+def test_system_prompt_does_not_claim_empty_knowledge(tmp_path: Path) -> None:
+    """An empty store must not be rendered as a fake `- (empty)` knowledge item."""
+    atlas = Atlas.init(tmp_path, name="empty-knowledge")
+    try:
+        prompt = build_system_prompt(atlas.config, atlas.knowledge)
+        assert "(empty)" not in prompt
+        assert "no project knowledge yet" in prompt
+    finally:
+        atlas.close()
+
+
+def test_system_prompt_renders_written_knowledge(tmp_path: Path) -> None:
+    atlas = Atlas.init(tmp_path, name="written-knowledge")
+    try:
+        atlas.knowledge.write(
+            KnowledgeItem(
+                title="Tests run with pytest",
+                body="Use `pytest -q` from the repo root.",
+                kind="command",
+                scope="project",
+                project_id=atlas.knowledge.project_id,
+            )
+        )
+        prompt = build_system_prompt(atlas.config, atlas.knowledge)
+        assert "[command] Tests run with pytest" in prompt
+        assert "no project knowledge yet" not in prompt
     finally:
         atlas.close()

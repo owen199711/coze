@@ -161,7 +161,7 @@ atlas session list
 atlas knowledge search "pytest"
 atlas knowledge add --title "Test command" --body "python -m pytest -q" --kind command
 atlas knowledge validate kn_xxx --note "replayed in tests"
-atlas curator run [--llm]
+atlas curator run [--llm] [--replay]
 atlas serve --port 8765
 atlas eval [--repeat 2]
 ```
@@ -174,9 +174,11 @@ claim. Use `atlas demo` for the offline end-to-end check.
 
 `atlas curator run` is deterministic by default. `--llm` asks the configured model
 for root-cause/prevention and falls back to the deterministic template when the
-model is missing or returns unusable JSON. Lessons stay `candidate` until a
-validation/replay step promotes them; `atlas knowledge validate` requires a
-human note, and the agent-facing tool requires validation evidence.
+model is missing or returns unusable JSON. `--replay` re-runs the recorded failed
+command and promotes a candidate only when it now passes. Lessons stay
+`candidate` until a validation/replay step promotes them; `atlas knowledge
+validate` requires a human note, and the agent-facing tool requires replay/test
+evidence.
 
 The daemon exposes `POST /rpc` (JSON-RPC 2.0) and `GET /health`:
 
@@ -226,7 +228,7 @@ re-created automatically. It is still a shell; Webview/diff/plan/task panels are
 | Skills (local/URL `SKILL.md` install) | ✅ descriptions in prompt; loaded on demand; private URLs denied |
 | Context compaction (`/compact`) | ✅ model summary + reduced checkpoint; summary is pinned |
 | Offline end-to-end demo | ✅ |
-| Curator (deterministic consolidation/report; optional LLM RCA) | 🟡 replay validation pending; honors `learning.enabled` |
+| Curator (deterministic consolidation/report; optional LLM RCA; `--replay`) | 🟡 replay + single-flight; idle scheduler pending |
 | JSON-RPC HTTP daemon (`/rpc`, `/health`) | ✅ per-session lock; auth on non-loopback |
 | Eval harness (10 tasks; repeatable; red baseline) | 🟡 historical 10/10 claim not reproducible offline |
 | VSCode extension shell | 🟡 chat/doctor/init/server/token; no panels |
@@ -253,6 +255,36 @@ This replaces three separate systems (`MemoryService`, `LessonStore`, `ProjectKn
 `scope` decides isolation. `kind` is a classification; `lesson` requires a passed
 validation before it can be `active`, while preference/decision confirmation
 policies are still M1. `atlas knowledge validate` requires a human note.
+
+### Recall and capture (ADR-0004)
+
+- Before each model call, `build_system_prompt(..., query=user_message)` calls
+  `KnowledgeService.recall(limit=20)`. Retrieval uses FTS5 candidates plus
+  `knowledge_chunks` lexical matches (hybrid), then ranks by relevance ×
+  confidence × freshness × severity, applies per-kind token budgets (CJK-aware)
+  and injects citations such as `[kn_ab12] fact · source:file:README.md`.
+- Empty queries fall back to the recent active window (used by tests/tools).
+- `knowledge` tool writes from the agent are candidates for
+  `fact/preference/decision/assumption/lesson`; CLI `atlas knowledge add` remains a
+  human write. `check` evidence is recorded in `verifications`.
+- At turn end, explicit correction/preference phrases (`不对`, `以后`, `记住`,
+  `prefer`, `remember`, ...) are captured as a **candidate fact** with a
+  session/turn source. Controlled by `learning.capture: off | candidate`.
+  Capture never writes active knowledge and never makes an extra model call.
+- `feedback` cannot revive a quarantined/candidate item; promotion requires
+  validation. Agent promotion requires `replay:`/`test:` evidence; manual
+  promotion is a CLI/human action.
+- `consolidate()` also ages out unused lessons (90 days without recall) and
+  expired assumptions; file-backed `doc/command/contract` sources are hashed by
+  `refresh_sources()`, and a changed file marks the item stale.
+- `doctor` reports knowledge counts by status/kind.
+- Writes reject likely secret material (API keys/private keys) and carry a
+  `trust` level; untrusted items are excluded from recall by default.
+- Write paths are transactional (item + chunks + FTS).
+- Source hash refresh covers file-backed `doc/command/contract`; generic TTL for
+  facts/commands/contracts is implemented in `consolidate()`, and Curator has a
+  per-run LLM budget. Idle scheduling, semantic/LLM extraction and Review UI remain
+  deferred; see ADR-0004.
 
 ### Budgets and cost
 
@@ -346,10 +378,14 @@ tests/
   `default` asks for approval before non-read-only tools and fails closed without an
   interactive callback; `accept_edits`/`dont_ask` skip the prompt. The full
   `permissions.allow/deny` rule engine is deferred.
-- Auto memory writeback (ADR-0001) is deferred; knowledge is written via the
-  `knowledge` tool or `atlas knowledge add`.
-- Curator is manual (`atlas curator run`); the idle/nightly scheduler and per-night
-  budget (`learning.idle_minutes`, `learning.budget`) are not wired yet.
+- Automatic memory writeback is limited to conservative correction/preference
+  capture as candidates (ADR-0004); semantic extraction and review UI are deferred.
+- Curator is manual (`atlas curator run --replay`); it uses `jobs` for
+  single-flight and a per-run LLM budget, but the idle/nightly scheduler and true
+  per-night accounting (`learning.idle_minutes`, `learning.budget`) are not wired yet.
+- Recall is hybrid lexical: FTS5 over item text plus `knowledge_chunks` term
+  matching; there is still no vector/embedding index. Chunk hits carry
+  `origin=chunk|hybrid` and a `chunk_id` for observability.
 - `project.root` is honored, but `project.modules`, `style.profile`, `project.commands.setup`
   and the module graph are not consumed yet (CodebaseService is deferred).
 - `shell` deny list is a guard, not a security boundary; use Docker for untrusted repos.
@@ -360,6 +396,8 @@ tests/
   pass rate as a smoke signal, not a benchmark.
 - ADR-0002 (2026-11-18) changes `max_turns` to count LLM calls and raise
   `MaxTurnsExceeded`; this is a breaking behavior change.
+- ADR-0004 adds task-aware recall and candidate capture; see
+  [`docs/adr/ADR-0004-memory-recall-and-capture.md`](docs/adr/ADR-0004-memory-recall-and-capture.md).
 
 The point of this milestone is to make the **durable core** runnable and testable before
 adding more nouns. See `docs/atlas-maturity-roadmap.md` for the path from MVP to production.
